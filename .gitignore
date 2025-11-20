@@ -1,0 +1,11 @@
+# 创建目录用于测试（可选）
+/target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+*.iml
+.idea/
+.DS_Store
+.vscode/

@@ -1,0 +1,67 @@
+spring:
+  application:
+    name: scheduled-task-system
+  
+  datasource:
+    url: jdbc:mysql://192.168.111.227:3306/jy_job?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    hikari:
+      maximum-pool-size: 10
+      minimum-idle: 5
+      connection-timeout: 30000
+  
+  # 已移除 JPA，以下配置清理
+  
+  # Redis配置（可选，用于后续集群分布式锁）
+  # redis:
+  #   host: localhost
+  #   port: 6379
+  #   password: 
+  #   database: 0
+
+  # Quartz 配置（当 scheduler-type=quartz 时生效）
+  quartz:
+    job-store-type: jdbc
+    jdbc:
+      initialize-schema: always
+    properties:
+      org:
+        quartz:
+          scheduler:
+            instanceName: ScheduledTaskScheduler
+            instanceId: AUTO
+          jobStore:
+            tablePrefix: QRTZ_
+            isClustered: true
+            clusterCheckinInterval: 10000
+          threadPool:
+            threadCount: 10
+  
+  # Jackson 日期格式配置
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+
+server:
+  port: 18082
+
+# 任务调度配置
+scheduled:
+  task:
+    # 调度器类型：simple（内置线程池）/ quartz（Quartz调度器）
+    scheduler-type: quartz
+    # 核心线程数（仅 simple 模式使用）
+    core-pool-size: 10
+    # 最大重试次数
+    max-retry-count: 3
+    # 重试间隔（秒）
+    retry-interval-seconds: 60
+    # 分布式锁类型：local（本地锁）/ redis（Redis锁）
+    lock-type: local
+
+logging:
+  level:
+    com.example.scheduled: DEBUG
+    org.hibernate.SQL: DEBUG
