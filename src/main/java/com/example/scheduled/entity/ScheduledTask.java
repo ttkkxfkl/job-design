@@ -87,8 +87,9 @@ public class ScheduledTask {
         EMAIL,      // 邮件通知
         SMS,        // 短信通知
         WEBHOOK,    // HTTP回调
-        MQ,          // 消息队列
-        PLAN
+        MQ,         // 消息队列
+        PLAN,       // 任务计划
+        ALERT       // 报警升级评估
     }
 
     /**

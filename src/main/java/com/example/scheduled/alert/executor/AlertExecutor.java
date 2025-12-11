@@ -1,0 +1,223 @@
+package com.example.scheduled.alert.executor;
+
+import com.example.scheduled.alert.action.AlertActionExecutor;
+import com.example.scheduled.alert.entity.AlertRule;
+import com.example.scheduled.alert.entity.ExceptionEvent;
+import com.example.scheduled.alert.entity.ExceptionType;
+import com.example.scheduled.alert.entity.TriggerCondition;
+import com.example.scheduled.alert.detection.ExceptionDetectionStrategy;
+import com.example.scheduled.alert.repository.AlertRuleRepository;
+import com.example.scheduled.alert.repository.ExceptionEventRepository;
+import com.example.scheduled.alert.repository.ExceptionTypeRepository;
+import com.example.scheduled.alert.repository.TriggerConditionRepository;
+import com.example.scheduled.alert.service.AlertEscalationService;
+import com.example.scheduled.alert.trigger.TriggerStrategy;
+import com.example.scheduled.alert.trigger.TriggerStrategyFactory;
+import com.example.scheduled.entity.ScheduledTask;
+import com.example.scheduled.executor.TaskExecutor;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Component;
+
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 报警评估执行器 - 实现 TaskExecutor 接口
+ * 由任务调度系统在指定时间调用，评估报警条件是否满足
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class AlertExecutor implements TaskExecutor {
+
+    private final AlertRuleRepository alertRuleRepository;
+    private final ExceptionEventRepository exceptionEventRepository;
+    private final TriggerConditionRepository triggerConditionRepository;
+    private final ExceptionTypeRepository exceptionTypeRepository;
+    private final TriggerStrategyFactory triggerStrategyFactory;
+    private final AlertEscalationService alertEscalationService;
+    private final List<AlertActionExecutor> actionExecutors;
+    private final List<ExceptionDetectionStrategy> detectionStrategies;
+
+    @Override
+    public boolean support(ScheduledTask.TaskType taskType) {
+        return taskType == ScheduledTask.TaskType.ALERT;
+    }
+
+    @Override
+    public void execute(ScheduledTask task) throws Exception {
+        Map<String, Object> taskData = task.getTaskData();
+        Long exceptionEventId = ((Number) taskData.get("exceptionEventId")).longValue();
+        Long alertRuleId = ((Number) taskData.get("alertRuleId")).longValue();
+
+        log.info("开始执行报警评估任务: 异常[{}] 规则[{}]", exceptionEventId, alertRuleId);
+
+        try {
+            // 1. 获取异常事件和报警规则
+            ExceptionEvent event = exceptionEventRepository.selectById(exceptionEventId);
+            if (event == null) {
+                log.warn("异常事件 [{}] 不存在", exceptionEventId);
+                return;
+            }
+
+            AlertRule rule = alertRuleRepository.selectById(alertRuleId);
+            if (rule == null) {
+                log.warn("报警规则 [{}] 不存在", alertRuleId);
+                return;
+            }
+
+            // 2. 校验异常当前是否仍满足检测逻辑（不同异常类型有不同的业务判断）
+            ExceptionType exceptionType = exceptionTypeRepository.selectById(event.getExceptionTypeId());
+            if (exceptionType == null) {
+                log.warn("异常类型 [{}] 不存在", event.getExceptionTypeId());
+                return;
+            }
+
+            if (!isExceptionStillActive(exceptionType, event)) {
+                log.info("异常事件 [{}] 当前未满足业务检测逻辑，跳过本次告警评估", exceptionEventId);
+                return;
+            }
+
+            // 2. 检查异常是否已解决
+            if ("RESOLVED".equals(event.getStatus())) {
+                log.info("异常事件 [{}] 已解决，跳过评估", exceptionEventId);
+                return;
+            }
+
+            // 3. 获取触发条件并评估
+            TriggerCondition condition = triggerConditionRepository.selectById(rule.getTriggerConditionId());
+            if (condition == null) {
+                log.warn("触发条件 [{}] 不存在", rule.getTriggerConditionId());
+                return;
+            }
+
+            TriggerStrategy strategy = triggerStrategyFactory.createStrategy(condition);
+            boolean shouldTrigger = strategy.shouldTrigger(condition, event, LocalDateTime.now());
+
+            if (shouldTrigger) {
+                // ✅ 当前等级应该触发报警了！
+                handleAlertTriggered(event, rule, condition, strategy);
+            } else {
+                // ❌ 条件还不满足，继续等待
+                handleAlertNotTriggered(event, rule, condition, strategy);
+            }
+
+        } catch (Exception e) {
+            log.error("报警评估任务执行失败: 异常[{}] 规则[{}]", exceptionEventId, alertRuleId, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 处理报警被触发的情况
+     */
+    private void handleAlertTriggered(
+            ExceptionEvent event,
+            AlertRule rule,
+            TriggerCondition condition,
+            TriggerStrategy strategy) {
+
+        log.info("报警条件满足: 异常[{}] 规则[{}] 等级[{}]", event.getId(), rule.getId(), rule.getLevel());
+
+        // 1. 记录报警事件日志
+        alertEscalationService.logAlertEvent(event, rule, "触发条件已满足");
+
+        // 2. 执行报警动作（发邮件、短信等）
+        try {
+            executeAlertAction(event, rule);
+        } catch (Exception e) {
+            log.error("报警动作执行失败", e);
+        }
+
+        // 3. 更新异常事件的当前等级
+        event.setCurrentAlertLevel(rule.getLevel());
+        event.setLastEscalatedAt(LocalDateTime.now());
+        exceptionEventRepository.updateById(event);
+
+        // 4. 检查是否有更高等级的规则，如果有则为下一等级创建评估任务
+        alertEscalationService.scheduleNextLevelEvaluation(event, rule);
+    }
+
+    /**
+     * 处理报警条件不满足的情况
+     */
+    private void handleAlertNotTriggered(
+            ExceptionEvent event,
+            AlertRule rule,
+            TriggerCondition condition,
+            TriggerStrategy strategy) {
+
+        log.info("报警条件未满足: 异常[{}] 规则[{}] 等级[{}]，继续等待", event.getId(), rule.getId(), rule.getLevel());
+
+        // 计算下次评估时间
+        LocalDateTime nextEvaluationTime = strategy
+                .calculateNextEvaluationTime(condition, event, LocalDateTime.now());
+
+        if (nextEvaluationTime != null) {
+            // 为同一等级创建下一次评估任务
+            // 在这里我们只是重新计算，如果需要的话可以创建新的 ScheduledTask
+            log.info("下次评估时间: {}", nextEvaluationTime);
+            
+            // TODO: 可以选择在这里创建新的评估任务，或者让调度器自己处理
+            // alertEscalationService.createEvaluationTask(event, rule);
+        } else {
+            log.info("无需再评估该等级的条件");
+        }
+    }
+
+    /**
+     * 执行报警动作
+     */
+    private void executeAlertAction(ExceptionEvent event, AlertRule rule) throws Exception {
+        String actionType = rule.getActionType();
+        Map<String, Object> actionConfig = rule.getActionConfig();
+
+        // 查找对应的动作执行器
+        for (AlertActionExecutor executor : actionExecutors) {
+            if (executor.supports(actionType)) {
+                executor.execute(actionConfig, event, rule);
+                log.info("已执行报警动作: 类型[{}]", actionType);
+                return;
+            }
+        }
+
+        log.warn("未找到对应的报警动作执行器: {}", actionType);
+    }
+
+    @Override
+    public String getName() {
+        return "AlertExecutor";
+    }
+
+    /**
+     * 针对不同异常类型的业务检测逻辑，判断异常是否仍然成立
+     */
+    private boolean isExceptionStillActive(ExceptionType exceptionType, ExceptionEvent event) {
+        String logicType = exceptionType.getDetectionLogicType();
+        Map<String, Object> config = exceptionType.getDetectionConfig();
+        Map<String, Object> context = event.getDetectionContext();
+
+        if (logicType == null || logicType.isBlank()) {
+            // 未配置检测逻辑，默认认为异常仍然成立
+            return true;
+        }
+
+        ExceptionDetectionStrategy strategy = detectionStrategies.stream()
+                .filter(s -> logicType.equalsIgnoreCase(s.getStrategyName()))
+                .findFirst()
+                .orElse(null);
+
+        if (strategy == null) {
+            log.warn("未找到检测策略 [{}]，默认跳过本次评估", logicType);
+            return false;
+        }
+
+        boolean detected = strategy.detect(config, context);
+        if (!detected) {
+            log.info("检测策略 [{}] 判定异常未成立，config={} context={}", logicType, config, context);
+        }
+        return detected;
+    }
+}
