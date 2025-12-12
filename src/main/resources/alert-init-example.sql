@@ -93,6 +93,10 @@ SET @red_condition_id = LAST_INSERT_ID();
 -- ============================================
 
 -- BLUE 等级报警规则：日志输出
+-- 注意：创建异常事件时应包含 business_id 和 business_type 字段
+-- 示例: INSERT INTO exception_event (exception_type_id, business_id, business_type, detected_at, ...)
+--       VALUES (@exception_type_id, 'SHIFT_20251212_001', 'SHIFT', NOW(), ...)
+
 INSERT INTO alert_rule (
     exception_type_id,
     level,

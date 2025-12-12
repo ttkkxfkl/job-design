@@ -1,6 +1,7 @@
 package com.example.scheduled.alert.entity;
 
 import com.baomidou.mybatisplus.annotation.*;
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.config.JsonTypeHandler;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -77,11 +78,6 @@ public class AlertRule {
      * 获取等级优先级（用于排序）
      */
     public static int getLevelPriority(String level) {
-        return switch(level) {
-            case "BLUE" -> 1;
-            case "YELLOW" -> 2;
-            case "RED" -> 3;
-            default -> 0;
-        };
+        return AlertConstants.AlertLevels.getPriority(level);
     }
 }

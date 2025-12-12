@@ -17,6 +17,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.Map;
 
+import static com.example.scheduled.alert.constant.AlertConstants.PendingEscalationStatus.WAITING;
+
 /**
  * 告警系统恢复服务
  * 在系统启动时执行，负责恢复所有未完成的异常处理流程
@@ -143,6 +145,8 @@ public class AlertRecoveryService {
             eventPublisher.publishEvent(new AlertRecoveredEvent(
                     this,
                     event.getId(),
+                    event.getBusinessId(),
+                    event.getBusinessType(),
                     1,  // 恢复的任务数量
                     String.format("系统恢复: 已清理旧任务并重新调度")
             ));
@@ -209,12 +213,13 @@ public class AlertRecoveryService {
             for (String levelName : event.getPendingEscalations().keySet()) {
                 Object levelData = event.getPendingEscalations().get(levelName);
                 
-                if (levelData instanceof java.util.Map) {
-                    java.util.Map<String, Object> levelStatus = (java.util.Map<String, Object>) levelData;
+                if (levelData instanceof Map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> levelStatus = (Map<String, Object>) levelData;
                     String status = (String) levelStatus.get("status");
                     
                     // 如果是 WAITING 状态，需要重新检查依赖和调度
-                    if ("WAITING".equals(status)) {
+                    if (WAITING.equals(status)) {
                         log.info("重新调度待机等级: exceptionEventId={}, level={}", event.getId(), levelName);
                         
                         // 重新调度评估任务

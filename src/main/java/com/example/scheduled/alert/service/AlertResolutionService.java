@@ -16,7 +16,12 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
+
+import static com.example.scheduled.alert.constant.AlertConstants.ActionStatus.COMPLETED;
+import static com.example.scheduled.alert.constant.AlertConstants.AlertEventType.ALERT_RESOLVED;
+import static com.example.scheduled.alert.constant.AlertConstants.AlertEventType.TASK_CANCELLED;
 
 /**
  * 报警解除服务
@@ -89,6 +94,8 @@ public class AlertResolutionService {
             eventPublisher.publishEvent(new AlertResolutionEvent(
                     this,
                     exceptionEventId,
+                    exceptionEvent.getBusinessId(),
+                    exceptionEvent.getBusinessType(),
                     resolutionSource,
                     resolutionReason
             ));
@@ -112,7 +119,7 @@ public class AlertResolutionService {
     private int cancelAllPendingTasks(Long exceptionEventId) {
         try {
             // 从 AlertEscalationService 获取所有待机任务ID
-            java.util.List<String> pendingTaskIds = alertEscalationService.getPendingTasks(exceptionEventId);
+            List<String> pendingTaskIds = alertEscalationService.getPendingTasks(exceptionEventId);
 
             int cancelledCount = 0;
             for (String taskId : pendingTaskIds) {
@@ -151,9 +158,9 @@ public class AlertResolutionService {
                     .exceptionEventId(exceptionEventId)
                     .triggeredAt(LocalDateTime.now())
                     .alertLevel("CANCELLED")
-                    .eventType("TASK_CANCELLED")
+                    .eventType(TASK_CANCELLED)
                     .triggerReason(String.format("任务已取消: taskId=%s", taskId))
-                    .actionStatus("COMPLETED")
+                    .actionStatus(COMPLETED)
                     .createdAt(LocalDateTime.now())
                     .build();
 
@@ -178,9 +185,9 @@ public class AlertResolutionService {
                     .exceptionEventId(exceptionEventId)
                     .triggeredAt(LocalDateTime.now())
                     .alertLevel("RESOLVED")
-                    .eventType("ALERT_RESOLVED")
+                    .eventType(ALERT_RESOLVED)
                     .triggerReason(String.format("解除原因: %s (%s)", resolutionReason, resolutionSource.getDisplayName()))
-                    .actionStatus("COMPLETED")
+                    .actionStatus(COMPLETED)
                     .createdAt(LocalDateTime.now())
                     .build();
             

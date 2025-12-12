@@ -25,4 +25,17 @@ public interface ExceptionEventRepository extends BaseMapper<ExceptionEvent> {
     @Select("SELECT * FROM exception_event WHERE exception_type_id = #{exceptionTypeId} AND status = 'ACTIVE' " +
             "ORDER BY detected_at DESC")
     List<ExceptionEvent> findActiveEventsByExceptionType(Long exceptionTypeId);
+
+    /**
+     * 根据业务ID查询异常事件
+     */
+    @Select("SELECT * FROM exception_event WHERE business_id = #{businessId} ORDER BY detected_at DESC")
+    List<ExceptionEvent> findByBusinessId(String businessId);
+
+    /**
+     * 根据业务ID和业务类型查询活跃异常事件
+     */
+    @Select("SELECT * FROM exception_event WHERE business_id = #{businessId} AND business_type = #{businessType} " +
+            "AND status = 'ACTIVE' ORDER BY detected_at DESC")
+    List<ExceptionEvent> findActiveEventsByBusinessIdAndType(String businessId, String businessType);
 }

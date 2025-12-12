@@ -64,6 +64,8 @@ CREATE TABLE IF NOT EXISTS alert_rule (
 CREATE TABLE IF NOT EXISTS exception_event (
     id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
     exception_type_id BIGINT NOT NULL COMMENT '异常类型ID',
+    business_id VARCHAR(100) COMMENT '业务数据ID（标识报警来源于哪条业务数据）',
+    business_type VARCHAR(50) COMMENT '业务类型（如：SHIFT-班次, BOREHOLE-钻孔, OPERATION-操作等）',
     detected_at DATETIME NOT NULL COMMENT '异常发现时刻',
     detection_context JSON COMMENT '检测上下文信息（班次、操作人、班组等）',
     current_alert_level VARCHAR(20) DEFAULT 'NONE' COMMENT '当前报警等级：NONE-无, BLUE-蓝色, YELLOW-黄色, RED-红色',
@@ -76,7 +78,9 @@ CREATE TABLE IF NOT EXISTS exception_event (
     INDEX idx_status (status),
     INDEX idx_current_alert_level (current_alert_level),
     INDEX idx_detected_at (detected_at),
-    INDEX idx_created_at (created_at)
+    INDEX idx_created_at (created_at),
+    INDEX idx_business_id (business_id),
+    INDEX idx_business_type (business_type)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='异常事件表';
 
 -- 5. 报警事件日志表：记录每次报警的触发情况

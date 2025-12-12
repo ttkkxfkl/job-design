@@ -5,14 +5,20 @@ import com.example.scheduled.alert.repository.TriggerConditionRepository;
 import com.example.scheduled.alert.trigger.strategy.AbsoluteTimeTrigger;
 import com.example.scheduled.alert.trigger.strategy.HybridTrigger;
 import com.example.scheduled.alert.trigger.strategy.RelativeEventTrigger;
+import lombok.Data;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import static com.example.scheduled.alert.constant.AlertConstants.TriggerType.*;
+
+
 
 /**
  * 触发策略工厂 - 根据条件类型创建相应的策略实现
  */
 @Slf4j
+@Data
 @Component
 @RequiredArgsConstructor
 public class TriggerStrategyFactory {
@@ -30,17 +36,11 @@ public class TriggerStrategyFactory {
         String conditionType = condition.getConditionType();
 
         return switch(conditionType) {
-            case "ABSOLUTE" -> new AbsoluteTimeTrigger();
-            case "RELATIVE" -> new RelativeEventTrigger();
-            case "HYBRID" -> new HybridTrigger(this);
+            case ABSOLUTE -> new AbsoluteTimeTrigger();
+            case RELATIVE -> new RelativeEventTrigger();
+            case HYBRID -> new HybridTrigger(this);
             default -> throw new IllegalArgumentException("未知的触发条件类型: " + conditionType);
         };
     }
 
-    /**
-     * 获取 TriggerConditionRepository（供 HybridTrigger 使用）
-     */
-    public TriggerConditionRepository getTriggerConditionRepository() {
-        return triggerConditionRepository;
-    }
 }

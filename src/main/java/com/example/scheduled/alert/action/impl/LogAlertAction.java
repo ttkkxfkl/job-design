@@ -1,6 +1,7 @@
 package com.example.scheduled.alert.action.impl;
 
 import com.example.scheduled.alert.action.AlertActionExecutor;
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.AlertRule;
 import com.example.scheduled.alert.entity.ExceptionEvent;
 import lombok.extern.slf4j.Slf4j;
@@ -8,6 +9,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+
+import static com.example.scheduled.alert.constant.AlertConstants.AlertLevels.*;
 
 /**
  * 日志报警动作执行器 - 将报警信息输出到日志
@@ -24,9 +27,9 @@ public class LogAlertAction implements AlertActionExecutor {
         
         // 根据等级输出不同的日志级别
         switch (rule.getLevel().toUpperCase()) {
-            case "BLUE" -> log.warn("【蓝色预警】{}", message);
-            case "YELLOW" -> log.error("【黄色预警】{}", message);
-            case "RED" -> log.error("【红色警告】{}", message);
+            case BLUE, LEVEL_1 -> log.warn("【蓝色预警】{}", message);
+            case YELLOW, LEVEL_2 -> log.error("【黄色预警】{}", message);
+            case RED, LEVEL_3 -> log.error("【红色警告】{}", message);
             default -> log.info("【报警】{}", message);
         }
     }

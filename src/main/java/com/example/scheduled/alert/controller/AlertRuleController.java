@@ -1,5 +1,6 @@
 package com.example.scheduled.alert.controller;
 
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.*;
 import com.example.scheduled.alert.repository.*;
 import com.example.scheduled.alert.service.AlertEscalationService;
@@ -206,8 +207,8 @@ public class AlertRuleController {
     public ApiResponse<?> reportExceptionEvent(@RequestBody ExceptionEvent event) {
         try {
             event.setDetectedAt(LocalDateTime.now());
-            event.setStatus("ACTIVE");
-            event.setCurrentAlertLevel("NONE");
+            event.setStatus(AlertConstants.ExceptionEventStatus.ACTIVE);
+            event.setCurrentAlertLevel(AlertConstants.AlertLevels.NONE);
             event.setCreatedAt(LocalDateTime.now());
             event.setUpdatedAt(LocalDateTime.now());
 

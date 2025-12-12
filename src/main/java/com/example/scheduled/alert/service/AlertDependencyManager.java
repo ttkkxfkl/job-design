@@ -1,5 +1,7 @@
 package com.example.scheduled.alert.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.ExceptionEvent;
 import com.example.scheduled.alert.event.AlertSystemEvent;
 import com.example.scheduled.alert.repository.ExceptionEventRepository;
@@ -10,7 +12,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
+
+import static com.example.scheduled.alert.constant.AlertConstants.ExceptionEventStatus.ACTIVE;
+import static com.example.scheduled.alert.constant.AlertConstants.JsonFields.*;
+import static com.example.scheduled.alert.constant.AlertConstants.LogicalOperator.AND;
+import static com.example.scheduled.alert.constant.AlertConstants.LogicalOperator.OR;
+import static com.example.scheduled.alert.constant.AlertConstants.PendingEscalationStatus.*;
+import static com.example.scheduled.alert.constant.AlertConstants.TimeFieldSuffix.TIME;
 
 /**
  * 告警依赖管理服务
@@ -59,54 +70,112 @@ public class AlertDependencyManager {
     /**
      * 将事件记录到 detection_context
      * detection_context 用于追踪已发生的事件时间
+     * 
+     * 逻辑：
+     * 1. 如果事件指定了 exceptionEventId，则只更新该异常事件
+     * 2. 如果事件只有 businessId，则更新所有归属于该业务的活跃异常事件
      */
     private void recordEventToContext(AlertSystemEvent event) {
         try {
-            // 如果是来自异常事件本身的更新，直接更新该异常
+            java.util.List<ExceptionEvent> eventsToUpdate = new java.util.ArrayList<>();
+            
+            // 情况1：指定了异常事件ID，直接更新该异常
             if (event.getExceptionEventId() != null) {
                 ExceptionEvent exceptionEvent = exceptionEventRepository.selectById(event.getExceptionEventId());
-                if (exceptionEvent != null) {
-                    // 初始化或更新 detection_context
-                    if (exceptionEvent.getDetectionContext() == null) {
-                        exceptionEvent.setDetectionContext(new java.util.HashMap<>());
-                    }
-
-                    // 记录事件发生时间
-                    exceptionEvent.getDetectionContext().put(
-                            event.getEventType() + "_time",
-                            LocalDateTime.now().toString()
-                    );
-
-                    exceptionEventRepository.updateById(exceptionEvent);
-                    log.info("已更新事件上下文: exceptionEventId={}, eventType={}", 
-                            event.getExceptionEventId(), event.getEventType());
+                if (exceptionEvent != null && ACTIVE.equals(exceptionEvent.getStatus())) {
+                    eventsToUpdate.add(exceptionEvent);
                 }
+            }
+            // 情况2：只有业务ID，查询所有归属于该业务的活跃异常事件
+            else if (event.getBusinessId() != null) {
+                eventsToUpdate = exceptionEventRepository.findActiveEventsByBusinessIdAndType(
+                    event.getBusinessId(), 
+                    event.getBusinessType()
+                );
+                log.debug("根据业务ID查询到 {} 个活跃异常事件: businessId={}, businessType={}",
+                    eventsToUpdate.size(), event.getBusinessId(), event.getBusinessType());
+            }
+            
+            // 更新所有匹配的异常事件的 detection_context
+            for (ExceptionEvent exceptionEvent : eventsToUpdate) {
+                // 初始化或更新 detection_context
+                if (exceptionEvent.getDetectionContext() == null) {
+                    exceptionEvent.setDetectionContext(new java.util.HashMap<>());
+                }
+
+                // 记录事件发生时间
+                exceptionEvent.getDetectionContext().put(
+                        event.getEventType() + TIME,
+                        LocalDateTime.now().toString()
+                );
+
+                exceptionEventRepository.updateById(exceptionEvent);
+                log.info("已更新事件上下文: exceptionEventId={}, businessId={}, eventType={}", 
+                        exceptionEvent.getId(), exceptionEvent.getBusinessId(), event.getEventType());
+            }
+            
+            if (eventsToUpdate.isEmpty()) {
+                log.debug("未找到需要更新的异常事件: eventType={}, businessId={}, exceptionEventId={}",
+                    event.getEventType(), event.getBusinessId(), event.getExceptionEventId());
             }
 
         } catch (Exception e) {
-            log.error("记录事件到 detection_context 时出现异常", e);
+            log.error("记录事件到 detection_context 时出现异常: businessId={}", event.getBusinessId(), e);
         }
     }
 
     /**
      * 检查并触发待机的报警升级
-     * 遍历所有 ACTIVE 状态的异常，检查其 pending_escalations 中的依赖是否满足
+     * 遍历所有匹配业务ID的 ACTIVE 状态异常，检查其 pending_escalations 中的依赖是否满足
+     * 
+     * 逻辑：
+     * 1. 如果事件指定了 exceptionEventId，只检查该异常
+     * 2. 如果事件只有 businessId，检查所有归属于该业务的活跃异常
      */
     private void checkAndTriggerPendingEscalations(AlertSystemEvent event) {
         try {
-            // 查询所有 ACTIVE 状态的异常事件
-            java.util.List<ExceptionEvent> activeEvents = exceptionEventRepository.selectList(
-                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ExceptionEvent>()
-                            .eq(ExceptionEvent::getStatus, "ACTIVE")
-                            .isNotNull(ExceptionEvent::getPendingEscalations)
-            );
+            List<ExceptionEvent> activeEvents = new ArrayList<>();
+            
+            // 情况1：指定了异常事件ID，只检查该异常
+            if (event.getExceptionEventId() != null) {
+                ExceptionEvent exceptionEvent = exceptionEventRepository.selectById(event.getExceptionEventId());
+                if (exceptionEvent != null && ACTIVE.equals(exceptionEvent.getStatus()) 
+                    && exceptionEvent.getPendingEscalations() != null) {
+                    activeEvents.add(exceptionEvent);
+                }
+            }
+            // 情况2：根据业务ID查询所有相关的活跃异常事件
+            else if (event.getBusinessId() != null) {
+                // 构建查询条件：ACTIVE状态 + 相同businessId + 有待机升级
+                LambdaQueryWrapper<ExceptionEvent> wrapper =
+                    new LambdaQueryWrapper<ExceptionEvent>()
+                        .eq(ExceptionEvent::getStatus, ACTIVE)
+                        .eq(ExceptionEvent::getBusinessId, event.getBusinessId())
+                        .isNotNull(ExceptionEvent::getPendingEscalations);
+                
+                // 如果指定了业务类型，也加入过滤条件
+                if (event.getBusinessType() != null) {
+                    wrapper.eq(ExceptionEvent::getBusinessType, event.getBusinessType());
+                }
+                
+                activeEvents = exceptionEventRepository.selectList(wrapper);
+                
+                log.debug("根据业务ID查询到 {} 个待检查的异常事件: businessId={}, businessType={}",
+                    activeEvents.size(), event.getBusinessId(), event.getBusinessType());
+            }
 
+            // 检查每个匹配的异常事件
             for (ExceptionEvent exceptionEvent : activeEvents) {
                 checkPendingEscalationsForEvent(exceptionEvent, event);
             }
+            
+            if (activeEvents.isEmpty()) {
+                log.debug("未找到需要检查待机升级的异常事件: eventType={}, businessId={}",
+                    event.getEventType(), event.getBusinessId());
+            }
 
         } catch (Exception e) {
-            log.error("检查待机升级时出现异常", e);
+            log.error("检查待机升级时出现异常: businessId={}", event.getBusinessId(), e);
         }
     }
 
@@ -131,10 +200,10 @@ public class AlertDependencyManager {
 
                 @SuppressWarnings("unchecked")
                 Map<String, Object> levelStatus = (Map<String, Object>) levelData;
-                String status = (String) levelStatus.get("status");
+                String status = (String) levelStatus.get(STATUS);
 
                 // 只处理 WAITING 状态的升级
-                if (!"WAITING".equals(status)) {
+                if (!WAITING.equals(status)) {
                     continue;
                 }
 
@@ -144,24 +213,25 @@ public class AlertDependencyManager {
                             exceptionEvent.getId(), levelName, triggeringEvent.getEventType());
 
                     // 更新 pending_escalations 状态为 READY
-                    levelStatus.put("status", "READY");
-                    levelStatus.put("readyAt", LocalDateTime.now().toString());
+                    levelStatus.put(STATUS, READY);
+                    levelStatus.put(READY_AT, LocalDateTime.now().toString());
                     exceptionEventRepository.updateById(exceptionEvent);
 
                     // 为该等级创建评估任务：若存在延迟要求，按事件时间+延迟调度，否则立即调度
                     LocalDateTime maxRequiredTime = null;
-                    Object depsObj = levelStatus.get("dependencies");
-                    if (depsObj instanceof java.util.List) {
-                        java.util.List<Object> dependencies = (java.util.List<Object>) depsObj;
+                    Object depsObj = levelStatus.get(DEPENDENCIES);
+                    if (depsObj instanceof List) {
+                        @SuppressWarnings("unchecked")
+                        List<Object> dependencies = (List<Object>) depsObj;
                         for (Object depObj : dependencies) {
                             if (!(depObj instanceof Map)) continue;
                             Map<String, Object> dep = (Map<String, Object>) depObj;
-                            String depEventType = (String) dep.get("eventType");
-                            Number dObj = (Number) dep.get("delayMinutes");
+                            String depEventType = (String) dep.get(EVENT_TYPE);
+                            Number dObj = (Number) dep.get(DELAY_MINUTES);
                             int d = dObj != null ? dObj.intValue() : 0;
 
                             if (exceptionEvent.getDetectionContext() != null) {
-                                Object depTimeObj = exceptionEvent.getDetectionContext().get(depEventType + "_time");
+                                Object depTimeObj = exceptionEvent.getDetectionContext().get(depEventType + TIME);
                                 if (depTimeObj != null) {
                                     try {
                                         LocalDateTime depTime = LocalDateTime.parse(depTimeObj.toString());
@@ -211,14 +281,15 @@ public class AlertDependencyManager {
     @SuppressWarnings("unchecked")
     private boolean checkDependenciesSatisfied(Map<String, Object> levelStatus, ExceptionEvent event) {
         try {
-            Object depsObj = levelStatus.get("dependencies");
-            if (!(depsObj instanceof java.util.List)) {
+            Object depsObj = levelStatus.get(DEPENDENCIES);
+            if (!(depsObj instanceof List)) {
                 log.warn("dependencies 不是 List 类型");
                 return false;
             }
 
-            java.util.List<Object> dependencies = (java.util.List<Object>) depsObj;
-            String logicalOperator = (String) levelStatus.getOrDefault("logicalOperator", "AND");
+            @SuppressWarnings("unchecked")
+            List<Object> dependencies = (List<Object>) depsObj;
+            String logicalOperator = (String) levelStatus.getOrDefault(LOGICAL_OPERATOR, AND);
 
             if (dependencies.isEmpty()) {
                 return true;  // 没有依赖，直接满足
@@ -243,11 +314,11 @@ public class AlertDependencyManager {
             }
 
             // AND 逻辑：所有依赖都满足
-            if ("AND".equalsIgnoreCase(logicalOperator)) {
+            if (AND.equalsIgnoreCase(logicalOperator)) {
                 return allSatisfied;
             }
             // OR 逻辑：任意一个依赖满足
-            else if ("OR".equalsIgnoreCase(logicalOperator)) {
+            else if (OR.equalsIgnoreCase(logicalOperator)) {
                 return anySatisfied;
             }
 
@@ -272,10 +343,10 @@ public class AlertDependencyManager {
     @SuppressWarnings("unchecked")
     private boolean checkSingleDependency(Map<String, Object> dependency, ExceptionEvent event) {
         try {
-            String eventType = (String) dependency.get("eventType");
-            Number delayMinutesObj = (Number) dependency.get("delayMinutes");
+            String eventType = (String) dependency.get(EVENT_TYPE);
+            Number delayMinutesObj = (Number) dependency.get(DELAY_MINUTES);
             int delayMinutes = delayMinutesObj != null ? delayMinutesObj.intValue() : 0;
-            Boolean required = (Boolean) dependency.getOrDefault("required", true);
+            Boolean required = (Boolean) dependency.getOrDefault(REQUIRED, true);
 
             // 检查 detection_context 中是否有该事件的记录
             if (event.getDetectionContext() == null) {
@@ -283,7 +354,7 @@ public class AlertDependencyManager {
                 return false;
             }
 
-            String eventTimeKey = eventType + "_time";
+            String eventTimeKey = eventType + TIME;
             Object eventTimeObj = event.getDetectionContext().get(eventTimeKey);
 
             if (eventTimeObj == null) {

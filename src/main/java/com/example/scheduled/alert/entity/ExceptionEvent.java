@@ -29,6 +29,16 @@ public class ExceptionEvent {
     private Long exceptionTypeId;
 
     /**
+     * 业务数据ID（标识报警来源于哪条业务数据）
+     */
+    private String businessId;
+
+    /**
+     * 业务类型（标识业务数据的类型，如：SHIFT-班次, BOREHOLE-钻孔, OPERATION-操作等）
+     */
+    private String businessType;
+
+    /**
      * 异常发现的时刻
      */
     private LocalDateTime detectedAt;

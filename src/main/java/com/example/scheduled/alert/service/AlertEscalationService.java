@@ -1,5 +1,6 @@
 package com.example.scheduled.alert.service;
 
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.*;
 import com.example.scheduled.alert.repository.AlertEventLogRepository;
 import com.example.scheduled.alert.repository.AlertRuleRepository;
@@ -17,6 +18,9 @@ import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+
+import static com.example.scheduled.alert.constant.AlertConstants.ActionStatus.SENT;
+import static com.example.scheduled.alert.constant.AlertConstants.Defaults.*;
 
 /**
  * 报警升级服务 - 负责报警的升级流程和评估任务的创建
@@ -84,9 +88,9 @@ public class AlertEscalationService {
                         ScheduledTask.TaskType.ALERT,
                         nextEvaluationTime,
                         taskData,
-                        1,
+                        DEFAULT_MAX_RETRY_COUNT,
                         rule.getPriority(),
-                        30L
+                        DEFAULT_EXECUTION_TIMEOUT
                 );
                 
                 String taskId = String.valueOf(task.getId());
@@ -170,15 +174,10 @@ public class AlertEscalationService {
     }
 
     /**
-     * 获取报警等级的数字优先级（BLUE=1, YELLOW=2, RED=3）
+     * 获取报警等级的数字优先级
      */
     private int getAlertLevelPriority(String level) {
-        return switch(level) {
-            case "BLUE" -> 1;
-            case "YELLOW" -> 2;
-            case "RED" -> 3;
-            default -> 0;
-        };
+        return AlertConstants.AlertLevels.getPriority(level);
     }
 
     /**
@@ -192,7 +191,7 @@ public class AlertEscalationService {
                 .triggeredAt(LocalDateTime.now())
                 .alertLevel(rule.getLevel())
                 .triggerReason(triggerReason)
-                .actionStatus("SENT")
+                .actionStatus(SENT)
                 .build();
 
             alertEventLogRepository.insert(alertLog);

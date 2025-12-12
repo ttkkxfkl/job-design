@@ -6,6 +6,8 @@ USE scheduled_task;
 
 -- 1. 为 exception_event 表添加新字段
 ALTER TABLE exception_event 
+ADD COLUMN IF NOT EXISTS business_id VARCHAR(100) COMMENT '业务数据ID（标识报警来源于哪条业务数据）' AFTER exception_type_id,
+ADD COLUMN IF NOT EXISTS business_type VARCHAR(50) COMMENT '业务类型（如：SHIFT-班次, BOREHOLE-钻孔, OPERATION-操作等）' AFTER business_id,
 ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' COMMENT '异常状态：ACTIVE-活跃, RESOLVING-解除中, RESOLVED-已解除' AFTER current_alert_level,
 ADD COLUMN IF NOT EXISTS resolved_at DATETIME COMMENT '异常解除时刻' AFTER last_escalated_at,
 ADD COLUMN IF NOT EXISTS resolution_reason VARCHAR(500) COMMENT '解除原因描述' AFTER resolved_at,
@@ -14,7 +16,9 @@ ADD COLUMN IF NOT EXISTS recovery_flag BOOLEAN DEFAULT false COMMENT '启动恢�
 ADD COLUMN IF NOT EXISTS pending_escalations JSON COMMENT '待机升级状态JSON：记录各等级的等待状态' AFTER detection_context,
 ADD INDEX IF NOT EXISTS idx_status (status),
 ADD INDEX IF NOT EXISTS idx_resolved_at (resolved_at),
-ADD INDEX IF NOT EXISTS idx_recovery_flag (recovery_flag);
+ADD INDEX IF NOT EXISTS idx_recovery_flag (recovery_flag),
+ADD INDEX IF NOT EXISTS idx_business_id (business_id),
+ADD INDEX IF NOT EXISTS idx_business_type (business_type);
 
 -- 2. 为 alert_event_log 表扩展event_type字段，支持记录更多事件类型
 ALTER TABLE alert_event_log 

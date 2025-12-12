@@ -2,6 +2,7 @@ package com.example.scheduled.alert.executor;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.scheduled.alert.action.AlertActionExecutor;
+import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.AlertEventLog;
 import com.example.scheduled.alert.entity.AlertRule;
 import com.example.scheduled.alert.entity.ExceptionEvent;
@@ -21,6 +22,9 @@ import com.example.scheduled.executor.TaskExecutor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+
+import static com.example.scheduled.alert.constant.AlertConstants.AlertEventType.ALERT_TRIGGERED;
+import static com.example.scheduled.alert.constant.AlertConstants.ExceptionEventStatus.ACTIVE;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -73,7 +77,7 @@ public class AlertExecutor implements TaskExecutor {
             }
             
             // 【关键】幂等性检查：如果事件已解除，跳过执行
-            if (!"ACTIVE".equals(event.getStatus())) {
+            if (!ACTIVE.equals(event.getStatus())) {
                 log.info("异常事件已解除（status={}），跳过评估: exceptionEventId={}", 
                         event.getStatus(), exceptionEventId);
                 return;
@@ -248,7 +252,7 @@ public class AlertExecutor implements TaskExecutor {
         LambdaQueryWrapper<AlertEventLog> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(AlertEventLog::getExceptionEventId, event.getId())
                .eq(AlertEventLog::getAlertLevel, level)
-               .eq(AlertEventLog::getEventType, "ALERT_TRIGGERED");
+               .eq(AlertEventLog::getEventType, ALERT_TRIGGERED);
         
         long count = alertEventLogRepository.selectCount(wrapper);
         

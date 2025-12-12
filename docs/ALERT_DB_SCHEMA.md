@@ -17,6 +17,8 @@
 CREATE TABLE IF NOT EXISTS exception_event (
   id BIGINT AUTO_INCREMENT PRIMARY KEY,
   exception_type_id BIGINT NOT NULL COMMENT '异常类型ID',
+  business_id VARCHAR(100) NULL COMMENT '业务数据ID（标识报警来源于哪条业务数据）',
+  business_type VARCHAR(50) NULL COMMENT '业务类型（如：SHIFT-班次, BOREHOLE-钻孔等）',
   status VARCHAR(20) NOT NULL COMMENT 'ACTIVE/RESOLVING/RESOLVED',
   current_alert_level VARCHAR(32) NOT NULL DEFAULT 'NONE' COMMENT '当前报警等级',
   detected_at DATETIME NOT NULL COMMENT '首次检测时间',
@@ -41,6 +43,8 @@ CREATE TABLE IF NOT EXISTS exception_event (
 |--------|------|----------|--------|------|
 | id | BIGINT | 是(PK) | AUTO | 主键 |
 | exception_type_id | BIGINT | 是 | - | 异常类型ID，外键关联 exception_type |
+| business_id | VARCHAR(100) | 否 | NULL | 业务数据ID，标识报警来源的业务数据唯一标识 |
+| business_type | VARCHAR(50) | 否 | NULL | 业务类型，如：SHIFT(班次)/BOREHOLE(钻孔)/OPERATION(操作) |
 | status | VARCHAR(20) | 是 | - | 事件状态：ACTIVE/RESOLVING/RESOLVED |
 | current_alert_level | VARCHAR(32) | 是 | 'NONE' | 当前报警等级：NONE/LEVEL_1/LEVEL_2 |
 | detected_at | DATETIME | 是 | - | 首次检测到异常的时间 |
@@ -63,6 +67,8 @@ CREATE TABLE IF NOT EXISTS exception_event (
 {
   "id": 100,
   "exception_type_id": 1,
+  "business_id": "SHIFT_20251212_001",
+  "business_type": "SHIFT",
   "status": "ACTIVE",
   "current_alert_level": "LEVEL_1",
   "detected_at": "2025-12-12T08:00:00",
@@ -115,32 +121,80 @@ CREATE TABLE IF NOT EXISTS alert_rule (
 | org_scope | VARCHAR(128) | 否 | NULL | 适用机构范围，如省/市/县 |
 | priority | INT | 是 | 5 | 优先级，数字越大优先级越高 |
 | action_type | VARCHAR(64) | 否 | NULL | 动作类型：LOG/EMAIL/SMS/WEBHOOK |
-| trigger_condition | JSON | 是 | - | 触发时间条件的组合逻辑 |
-| dependent_events | JSON | 否 | NULL | 依赖的外部事件配置 |
+| trigger_condition | JSON | 是 | - | **触发条件**：计算何时执行评估任务的时间规则 |
+| dependent_events | JSON | 否 | NULL | **依赖事件**：判断是否可以升级的前置条件 |
 | created_at | DATETIME | 是 | CURRENT_TIMESTAMP | 创建时间 |
 | updated_at | DATETIME | 是 | CURRENT_TIMESTAMP | 更新时间 |
 
 **索引说明：**
 - `idx_type_level`: 按异常类型和等级组合查询
 - `idx_enabled`: 快速过滤启用的规则
-- `trigger_condition` 示例：
+
+**重要字段说明：**
+
+### trigger_condition（触发条件） vs dependent_events（依赖事件）
+
+这两个字段容易混淆，但作用完全不同：
+
+| 对比维度 | trigger_condition | dependent_events |
+|---------|------------------|------------------|
+| **作用** | 计算**何时评估**这个规则 | 判断**能否升级**到这个等级 |
+| **影响** | 决定 ScheduledTask 的执行时间 | 决定报警是否真正触发 |
+| **必填性** | 必填 | 可选 |
+| **处理时机** | 创建规则/事件发生时 | 评估任务执行时 |
+
+**trigger_condition 示例**（计算评估时间）：
 ```json
 {
   "relation": "AND",
   "items": [
-    {"operator": ">", "source": "业务事件", "field": "探水计划首次开始时间", "offsetValue": 16, "offsetUnit": "小时"}
+    {
+      "operator": ">", 
+      "source": "业务事件", 
+      "field": "探水计划首次开始时间", 
+      "offsetValue": 16, 
+      "offsetUnit": "小时"
+    }
   ]
 }
 ```
-- `dependent_events` 示例：
+→ 含义：在"探水计划首次开始"**之后16小时**创建评估任务
+
+**dependent_events 示例**（判断能否触发）：
 ```json
 {
   "logicalOperator": "AND",
   "events": [
-    {"eventType": "FIRST_BOREHOLE_START", "delayMinutes": 120, "required": true}
+    {
+      "eventType": "FIRST_BOREHOLE_START", 
+      "delayMinutes": 120, 
+      "required": true
+    }
   ]
 }
 ```
+→ 含义：必须**等到** "第一个钻孔开始" 事件发生**且过了120分钟**，才能触发此等级报警
+
+**配合使用示例**：
+```json
+{
+  "trigger_condition": {
+    "type": "RELATIVE",
+    "eventType": "FIRST_BOREHOLE_START",
+    "offsetMinutes": 120
+  },
+  "dependent_events": {
+    "events": [
+      {"eventType": "FIRST_BOREHOLE_START", "delayMinutes": 120}
+    ]
+  }
+}
+```
+→ 工作流程：
+1. 等待 FIRST_BOREHOLE_START 事件发生（dependent_events 检查）
+2. 事件发生后，根据 trigger_condition 计算时间：事件时间 + 120分钟
+3. 在计算出的时间点执行评估任务
+4. 执行时再次检查 dependent_events 是否满足（双重保险）
 
 ### 1.3 `exception_type` 异常类型表
 - 用途：定义异常的检测逻辑类型与参数配置
