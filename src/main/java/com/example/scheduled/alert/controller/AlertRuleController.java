@@ -83,9 +83,9 @@ public class AlertRuleController {
     // ==================== 报警规则管理 ====================
 
     /**
-     * 创建报警规则
+     * 创建报警规则（兼容：POST /api/alert/rule 与 /api/alert/rules）
      */
-    @PostMapping("/rule")
+    @PostMapping({"/rule", "/rules"})
     public ApiResponse<?> createAlertRule(@RequestBody AlertRule rule) {
         try {
             rule.setCreatedAt(LocalDateTime.now());
@@ -115,6 +115,85 @@ public class AlertRuleController {
         } catch (Exception e) {
             log.error("查询报警规则失败", e);
             return ApiResponse.error("查询报警规则失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取所有报警规则（列表接口）
+     */
+    @GetMapping("/rules")
+    public ApiResponse<?> listAllRules(@RequestParam(required = false) String level,
+                                       @RequestParam(required = false) Boolean enabled,
+                                       @RequestParam(required = false) String orgScope) {
+        try {
+            // 简化：直接返回全部，必要时可加过滤条件
+            List<AlertRule> rules = alertRuleRepository.selectList(null);
+            return ApiResponse.success("查询成功", rules);
+        } catch (Exception e) {
+            log.error("查询报警规则列表失败", e);
+            return ApiResponse.error("查询报警规则列表失败: " + e.getMessage());
+        }
+    }
+
+    /** 获取单个报警规则 */
+    @GetMapping("/rules/item/{id}")
+    public ApiResponse<?> getRule(@PathVariable Long id) {
+        try {
+            AlertRule rule = alertRuleRepository.selectById(id);
+            if (rule == null) return ApiResponse.error("报警规则不存在");
+            return ApiResponse.success("查询成功", rule);
+        } catch (Exception e) {
+            log.error("查询报警规则失败", e);
+            return ApiResponse.error("查询报警规则失败: " + e.getMessage());
+        }
+    }
+
+    /** 更新报警规则 */
+    @PutMapping("/rules/{id}")
+    public ApiResponse<?> updateRule(@PathVariable Long id, @RequestBody AlertRule patch) {
+        try {
+            AlertRule existing = alertRuleRepository.selectById(id);
+            if (existing == null) return ApiResponse.error("报警规则不存在");
+            patch.setId(id);
+            patch.setUpdatedAt(LocalDateTime.now());
+            alertRuleRepository.updateById(patch);
+            return ApiResponse.success("更新成功", alertRuleRepository.selectById(id));
+        } catch (Exception e) {
+            log.error("更新报警规则失败", e);
+            return ApiResponse.error("更新报警规则失败: " + e.getMessage());
+        }
+    }
+
+    /** 删除报警规则 */
+    @DeleteMapping("/rules/{id}")
+    public ApiResponse<?> deleteRule(@PathVariable Long id) {
+        try {
+            int rows = alertRuleRepository.deleteById(id);
+            if (rows == 0) return ApiResponse.error("报警规则不存在或已删除");
+            return ApiResponse.success("删除成功", id);
+        } catch (Exception e) {
+            log.error("删除报警规则失败", e);
+            return ApiResponse.error("删除报警规则失败: " + e.getMessage());
+        }
+    }
+
+    /** 启用/禁用报警规则 */
+    @PutMapping("/rules/{id}/enabled")
+    public ApiResponse<?> toggleEnabled(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        try {
+            AlertRule rule = alertRuleRepository.selectById(id);
+            if (rule == null) return ApiResponse.error("报警规则不存在");
+            Object enabledObj = body.get("enabled");
+            if (!(enabledObj instanceof Boolean)) {
+                return ApiResponse.error("参数错误: enabled");
+            }
+            rule.setEnabled((Boolean) enabledObj);
+            rule.setUpdatedAt(LocalDateTime.now());
+            alertRuleRepository.updateById(rule);
+            return ApiResponse.success("更新成功", rule);
+        } catch (Exception e) {
+            log.error("更新启用状态失败", e);
+            return ApiResponse.error("更新启用状态失败: " + e.getMessage());
         }
     }
 

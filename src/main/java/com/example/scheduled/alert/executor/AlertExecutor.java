@@ -1,11 +1,14 @@
 package com.example.scheduled.alert.executor;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.scheduled.alert.action.AlertActionExecutor;
+import com.example.scheduled.alert.entity.AlertEventLog;
 import com.example.scheduled.alert.entity.AlertRule;
 import com.example.scheduled.alert.entity.ExceptionEvent;
 import com.example.scheduled.alert.entity.ExceptionType;
 import com.example.scheduled.alert.entity.TriggerCondition;
 import com.example.scheduled.alert.detection.ExceptionDetectionStrategy;
+import com.example.scheduled.alert.repository.AlertEventLogRepository;
 import com.example.scheduled.alert.repository.AlertRuleRepository;
 import com.example.scheduled.alert.repository.ExceptionEventRepository;
 import com.example.scheduled.alert.repository.ExceptionTypeRepository;
@@ -36,6 +39,7 @@ public class AlertExecutor implements TaskExecutor {
     private final ExceptionEventRepository exceptionEventRepository;
     private final TriggerConditionRepository triggerConditionRepository;
     private final ExceptionTypeRepository exceptionTypeRepository;
+    private final AlertEventLogRepository alertEventLogRepository;
     private final TriggerStrategyFactory triggerStrategyFactory;
     private final AlertEscalationService alertEscalationService;
     private final List<AlertActionExecutor> actionExecutors;
@@ -65,6 +69,20 @@ public class AlertExecutor implements TaskExecutor {
             AlertRule rule = alertRuleRepository.selectById(alertRuleId);
             if (rule == null) {
                 log.warn("报警规则 [{}] 不存在", alertRuleId);
+                return;
+            }
+            
+            // 【关键】幂等性检查：如果事件已解除，跳过执行
+            if (!"ACTIVE".equals(event.getStatus())) {
+                log.info("异常事件已解除（status={}），跳过评估: exceptionEventId={}", 
+                        event.getStatus(), exceptionEventId);
+                return;
+            }
+            
+            // 【关键】幂等性检查：检查是否已执行过此等级（防止重复执行）
+            if (isLevelAlreadyTriggered(event, rule.getLevel())) {
+                log.info("等级 [{}] 已触发过，跳过重复执行: exceptionEventId={}", 
+                        rule.getLevel(), exceptionEventId);
                 return;
             }
 
@@ -219,5 +237,25 @@ public class AlertExecutor implements TaskExecutor {
             log.info("检测策略 [{}] 判定异常未成立，config={} context={}", logicType, config, context);
         }
         return detected;
+    }
+    
+    /**
+     * 检查指定等级是否已触发过（幂等性保护）
+     * 防止Quartz持久化冲突导致重复执行
+     */
+    private boolean isLevelAlreadyTriggered(ExceptionEvent event, String level) {
+        // 检查 alert_event_log 中是否有该等级的 ALERT_TRIGGERED 记录
+        LambdaQueryWrapper<AlertEventLog> wrapper = new LambdaQueryWrapper<>();
+        wrapper.eq(AlertEventLog::getExceptionEventId, event.getId())
+               .eq(AlertEventLog::getAlertLevel, level)
+               .eq(AlertEventLog::getEventType, "ALERT_TRIGGERED");
+        
+        long count = alertEventLogRepository.selectCount(wrapper);
+        
+        if (count > 0) {
+            log.debug("等级 [{}] 已有 {} 条触发记录", level, count);
+        }
+        
+        return count > 0;
     }
 }

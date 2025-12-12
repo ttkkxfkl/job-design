@@ -12,25 +12,35 @@
 src/main/java/com/example/scheduled/alert/
 ├── entity/                          ✅ 5个数据实体类
 │   ├── ExceptionType.java           # 异常类型
-│   ├── TriggerCondition.java        # 触发条件
-│   ├── AlertRule.java               # 报警规则
-│   ├── ExceptionEvent.java          # 异常事件
-│   └── AlertEventLog.java           # 报警日志
+│   ├── AlertRule.java               # 报警规则（含trigger_condition、dependent_events JSON）
+│   ├── ExceptionEvent.java          # 异常事件（含pending_escalations JSON）
+│   ├── AlertEventLog.java           # 报警日志
+│   └── DailyTaskStatistics.java     # 每日统计
 │
 ├── repository/                      ✅ 5个Repository类
 │   ├── ExceptionTypeRepository.java
-│   ├── TriggerConditionRepository.java
 │   ├── AlertRuleRepository.java
 │   ├── ExceptionEventRepository.java
-│   └── AlertEventLogRepository.java
+│   ├── AlertEventLogRepository.java
+│   └── DailyTaskStatisticsRepository.java
 │
 ├── trigger/                         ✅ 触发策略（核心！）
 │   ├── TriggerStrategy.java         # 策略接口
 │   ├── TriggerStrategyFactory.java  # 工厂类
 │   └── strategy/
-│       ├── AbsoluteTimeTrigger.java     # 固定时刻
-│       ├── RelativeEventTrigger.java    # 相对事件时间
-│       └── HybridTrigger.java           # 混合条件
+│       ├── TimeTrigger.java             # 时间触发
+│       └── ConditionTrigger.java        # 条件触发
+│
+├── enums/                           ✅ 枚举类型
+│   ├── ExceptionStatus.java         # ACTIVE/RESOLVING/RESOLVED
+│   └── AlertEventType.java          # TRIGGERED/RESOLVED/CANCELLED
+│
+├── event/                           ✅ Spring事件系统
+│   ├── AlertSystemEvent.java        # 事件基类
+│   ├── AlertTriggeredEvent.java
+│   ├── AlertResolvedEvent.java
+│   ├── AlertRecoveredEvent.java
+│   └── DependencyEventOccurred.java
 │
 ├── detection/                       ✅ 异常检测
 │   ├── ExceptionDetectionStrategy.java
@@ -47,8 +57,11 @@ src/main/java/com/example/scheduled/alert/
 ├── executor/                        ✅ 集成到调度框架
 │   └── AlertExecutor.java           # 实现 TaskExecutor
 │
-├── service/                         ✅ 业务逻辑服务
-│   └── AlertEscalationService.java  # 升级管理
+├── service/                         ✅ 业务逻辑服务（核心）
+│   ├── AlertEscalationService.java  # 升级管理（任务创建、ID持久化）
+│   ├── AlertResolutionService.java  # 解除管理（任务取消、状态转换）
+│   ├── AlertDependencyManager.java  # 依赖事件管理
+│   └── AlertRecoveryService.java    # 系统恢复（启动时清理旧任务）
 │
 └── controller/                      ✅ REST API
     └── AlertRuleController.java     # 8个API接口
@@ -85,17 +98,35 @@ docs/
 ## 核心特性
 
 ### ✅ 等级逐步升级
-- 从BLUE → YELLOW → RED，每次升级一个等级
+- 从 LEVEL_1 → LEVEL_2 → LEVEL_3，每次升级一个等级
 - 避免同时创建多个任务，逻辑清晰
 
 ### ✅ 精确时间计算
-- 不需要轮询，根据触发条件精确计算下次评估时间
-- 创建ONCE模式的ScheduledTask，让调度系统精确执行
+- 不需要轮询，根据 alert_rule.trigger_condition JSON 精确计算下次评估时间
+- 创建ONCE模式的ScheduledTask，持久化 taskId 到 pending_escalations
+- 让调度系统在精确时间触发
 
-### ✅ 灵活的触发条件
-- **绝对时间**：固定时刻（如每天16:00）
-- **相对时间**：从事件开始计时（如班次开始+8小时）
-- **混合条件**：多条件AND/OR组合
+### ✅ 依赖事件管理
+- 支持等级依赖业务事件（alert_rule.dependent_events JSON）
+- 事件发生时自动触发待机等级的评估
+- AlertDependencyManager 处理事件通知和任务重新调度
+
+### ✅ 异常解除机制
+- 检测到业务条件恢复时自动解除
+- AlertResolutionService 取消所有待机任务
+- 状态转换: ACTIVE → RESOLVING → RESOLVED
+- 记录 ALERT_RESOLVED 和 TASK_CANCELLED 日志
+
+### ✅ 系统恢复能力
+- AlertRecoveryService 在启动时自动恢复未完成的告警流程
+- 清理 Quartz 中的旧任务，防止持久化冲突
+- 重新调度待机的升级任务
+- 处理 RESOLVING 状态的事件
+
+### ✅ 幂等性保护
+- AlertExecutor 执行前检查事件状态
+- 检查 alert_event_log 防止重复触发
+- 防止 Quartz 持久化冲突导致的重复执行
 
 ### ✅ 完整审计日志
 - 每次升级都有记录：时间、原因、动作结果

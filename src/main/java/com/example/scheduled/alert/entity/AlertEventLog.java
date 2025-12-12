@@ -9,7 +9,8 @@ import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
 /**
- * 报警事件日志表 - 记录每次报警的触发情况（审计日志）
+ * 报警事件日志表 - 记录每次报警的触发情况及状态变更（审计日志）
+ * 支持多种事件类型：报警触发、升级、解除、任务取消、系统恢复等
  */
 @TableName("alert_event_log")
 @Data
@@ -36,12 +37,18 @@ public class AlertEventLog {
     private String alertLevel;
 
     /**
+     * 事件类型：ALERT_TRIGGERED(报警触发)、ALERT_ESCALATED(报警升级)、ALERT_RESOLVED(报警解除)、
+     *          TASK_CANCELLED(任务取消)、SYSTEM_RECOVERY(系统恢复)
+     */
+    private String eventType;
+
+    /**
      * 触发原因（用于审计）
      */
     private String triggerReason;
 
     /**
-     * 动作执行状态：PENDING、SENT、FAILED
+     * 动作执行状态：PENDING、SENT、FAILED、COMPLETED
      */
     private String actionStatus;
 
@@ -51,13 +58,4 @@ public class AlertEventLog {
     private String actionErrorMessage;
 
     private LocalDateTime createdAt;
-
-    /**
-     * 动作执行状态枚举
-     */
-    public enum ActionStatus {
-        PENDING,  // 待执行
-        SENT,     // 已发送
-        FAILED    // 失败
-    }
 }

@@ -79,7 +79,7 @@ public class AlertEscalationService {
                 taskData.put("evaluationType", "ALERT_EVALUATION");
 
                 // 创建一个 ONCE 模式的定时任务提交给调度系统
-                taskManagementService.createOnceTask(
+                ScheduledTask task = taskManagementService.createOnceTask(
                         "报警评估-异常[" + event.getId() + "]-规则[" + rule.getId() + "]",
                         ScheduledTask.TaskType.ALERT,
                         nextEvaluationTime,
@@ -88,13 +88,50 @@ public class AlertEscalationService {
                         rule.getPriority(),
                         30L
                 );
+                
+                String taskId = String.valueOf(task.getId());
+                
+                // 【关键】将任务ID持久化到 pending_escalations JSON 中，防止重启后丢失
+                updatePendingEscalationsWithTaskId(event, rule.getLevel(), taskId, nextEvaluationTime);
+                
+                // 记录到内存Map（用于快速访问）
+                recordPendingTask(event.getId(), taskId);
 
-                log.info("已创建评估任务: 异常[{}] 规则[{}] 等级[{}] 评估时间[{}]",
-                        event.getId(), rule.getId(), rule.getLevel(), nextEvaluationTime);
+                log.info("已创建评估任务: 异常[{}] 规则[{}] 等级[{}] 评估时间[{}] 任务ID[{}]",
+                        event.getId(), rule.getId(), rule.getLevel(), nextEvaluationTime, taskId);
             }
         } catch (Exception e) {
             log.error("创建评估任务失败: 异常[{}] 规则[{}]", event.getId(), rule.getId(), e);
         }
+    }
+    
+    /**
+     * 更新 pending_escalations，添加任务ID（用于恢复和取消）
+     */
+    private void updatePendingEscalationsWithTaskId(ExceptionEvent event, String level, 
+                                                     String taskId, LocalDateTime scheduledTime) {
+        Map<String, Object> pendingEscalations = event.getPendingEscalations();
+        if (pendingEscalations == null) {
+            pendingEscalations = new HashMap<>();
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> levelStatus = (Map<String, Object>) pendingEscalations.get(level);
+        if (levelStatus == null) {
+            levelStatus = new HashMap<>();
+            pendingEscalations.put(level, levelStatus);
+        }
+
+        // 添加任务ID和调度时间
+        levelStatus.put("taskId", taskId);
+        levelStatus.put("scheduledTime", scheduledTime.toString());
+        levelStatus.put("updatedAt", LocalDateTime.now().toString());
+
+        event.setPendingEscalations(pendingEscalations);
+        exceptionEventRepository.updateById(event);
+        
+        log.debug("已更新pending_escalations: exceptionEventId={}, level={}, taskId={}", 
+                event.getId(), level, taskId);
     }
 
     /**
@@ -175,5 +212,104 @@ public class AlertEscalationService {
             exceptionEventRepository.updateById(event);
             log.info("异常事件 [{}] 已解决", exceptionEventId);
         }
+    }
+
+    /**
+     * 为特定等级创建或重新创建评估任务
+     * 用于系统启动恢复时重新调度待机任务
+     *
+     * @param exceptionEventId 异常事件ID
+     * @param levelName 等级名称（如 LEVEL_1、LEVEL_2）
+     */
+    @Transactional
+    public void scheduleEscalationEvaluation(Long exceptionEventId, String levelName) {
+        log.info("为异常事件 [{}] 的等级 [{}] 创建评估任务（恢复机制）", exceptionEventId, levelName);
+        
+        try {
+            // 1. 查询异常事件
+            ExceptionEvent event = exceptionEventRepository.selectById(exceptionEventId);
+            if (event == null) {
+                log.warn("异常事件不存在: exceptionEventId={}", exceptionEventId);
+                return;
+            }
+            
+            // 2. 查询该等级的规则
+            List<AlertRule> rules = alertRuleRepository
+                    .findEnabledRulesByExceptionType(event.getExceptionTypeId());
+            
+            AlertRule targetRule = rules.stream()
+                    .filter(rule -> rule.getLevel().equals(levelName))
+                    .findFirst()
+                    .orElse(null);
+            
+            if (targetRule == null) {
+                log.warn("规则不存在: exceptionTypeId={}, level={}", event.getExceptionTypeId(), levelName);
+                return;
+            }
+            
+            // 3. 创建评估任务
+            createEvaluationTask(event, targetRule);
+            
+        } catch (Exception e) {
+            log.error("恢复等级评估任务失败: exceptionEventId={}, level={}", exceptionEventId, levelName, e);
+        }
+    }
+
+    /**
+     * Schedule an escalation evaluation at an explicit trigger time.
+     * This is used when a dependency event occurred with a required delay (delayMinutes > 0).
+     */
+    public void scheduleEscalationEvaluation(Long exceptionEventId, String levelName, LocalDateTime triggerTime) {
+        Map<String, Object> taskData = new HashMap<>();
+        taskData.put("exceptionEventId", exceptionEventId);
+        taskData.put("levelName", levelName);
+        taskData.put("evaluationType", "ALERT_EVALUATION");
+
+        ScheduledTask task = taskManagementService.createOnceTask(
+            "报警评估-异常[" + exceptionEventId + "]-等级[" + levelName + "]",
+            ScheduledTask.TaskType.ALERT,
+            triggerTime,
+            taskData,
+            1,
+            1,
+            30L
+        );
+        recordPendingTask(exceptionEventId, String.valueOf(task.getId()));
+        log.info("已为异常事件 [{}] 等级 [{}] 在 [{}] 创建延时评估任务: {}",
+            exceptionEventId, levelName, triggerTime, task.getId());
+    }
+
+    /**
+     * 维护待机任务映射关系（支持任务取消）
+     * 当创建评估任务时，记录该任务的ID以便后续取消
+     * 
+     * 实现策略：
+     * 1. 使用静态 Map<Long, List<String>> 记录 exceptionEventId -> taskIds
+     * 2. 或者在 ExceptionEvent.pending_escalations JSON 中记录任务ID
+     * 3. 在 AlertResolutionService.cancelAllPendingTasks 中使用
+     */
+    private static final Map<Long, List<String>> PENDING_TASK_MAP = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * 记录待机任务ID（用于后续取消）
+     */
+    public void recordPendingTask(Long exceptionEventId, String taskId) {
+        PENDING_TASK_MAP.computeIfAbsent(exceptionEventId, k -> new java.util.ArrayList<>()).add(taskId);
+        log.debug("已记录待机任务: exceptionEventId={}, taskId={}", exceptionEventId, taskId);
+    }
+
+    /**
+     * 获取所有待机任务ID
+     */
+    public List<String> getPendingTasks(Long exceptionEventId) {
+        return PENDING_TASK_MAP.getOrDefault(exceptionEventId, new java.util.ArrayList<>());
+    }
+
+    /**
+     * 清除待机任务记录
+     */
+    public void clearPendingTasks(Long exceptionEventId) {
+        PENDING_TASK_MAP.remove(exceptionEventId);
+        log.debug("已清除待机任务记录: exceptionEventId={}", exceptionEventId);
     }
 }

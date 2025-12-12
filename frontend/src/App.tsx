@@ -7,6 +7,7 @@ import CalendarView from './components/CalendarView';
 import TaskTemplates from './components/TaskTemplates';
 import NotificationCenter from './components/NotificationCenter';
 import Analytics from './components/Analytics';
+import AlertRuleForm from './components/AlertRuleForm';
 import { Button } from './components/ui/button';
 import { 
   LayoutDashboard, 
@@ -33,6 +34,7 @@ function Sidebar() {
     { path: '/templates', icon: FileText, label: '任务模板' },
     { path: '/notifications', icon: Bell, label: '通知中心' },
     { path: '/analytics', icon: BarChart3, label: '数据分析' },
+    { path: '/alert-rules/new', icon: PlusCircle, label: '新建报警规则' },
   ];
 
   const isActive = (path: string) => location.pathname === path;
@@ -135,6 +137,7 @@ function AppContent() {
             <Route path="/templates" element={<TaskTemplates />} />
             <Route path="/notifications" element={<NotificationCenter />} />
             <Route path="/analytics" element={<Analytics />} />
+            <Route path="/alert-rules/new" element={<AlertRuleForm />} />
           </Routes>
         </main>
       </div>

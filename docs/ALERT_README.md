@@ -11,16 +11,18 @@
     ↓
 异常事件 (Exception Event) ← 异常被检测到
     ↓
-触发条件 (Trigger Condition) ← 计算下次评估时间
-    ↓
-报警规则 (Alert Rule) ← 创建 ScheduledTask
+报警规则 (Alert Rule) ← 使用 trigger_condition JSON 字段
+    ├─ 计算下次评估时间
+    ├─ 检查依赖事件 (dependent_events)
+    └─ 创建 ScheduledTask
     ↓
 任务调度系统 (Task Scheduler)
     ↓
 报警执行器 (Alert Executor)
     ├─ 评估触发条件
     ├─ 执行报警动作
-    └─ 为下一等级创建任务
+    ├─ 为下一等级创建任务
+    └─ 或解除异常 (AlertResolutionService)
 ```
 
 ### 工作流示例
@@ -29,40 +31,50 @@
 
 ```
 14:30  ┌─ 异常事件创建
-       ├─ 计算 BLUE 等级触发时间（16:00）
-       └─ 创建评估任务A
+       ├─ 查询最低等级规则 (LEVEL_1)
+       ├─ 计算触发时间（根据 trigger_condition）
+       └─ 创建评估任务A，持久化 taskId
 
 16:00  ┌─ 评估任务A 执行
-       ├─ 条件满足 ✓
+       ├─ 幂等性检查（防止重复执行）
+       ├─ 业务检测通过 ✓
+       ├─ 触发条件满足 ✓
        ├─ 执行 LOG 动作
-       ├─ 计算 YELLOW 等级触发时间（班次开始+8h）
-       └─ 创建评估任务B
+       ├─ 检查 LEVEL_2 依赖事件
+       └─ 创建 LEVEL_2 评估任务B
 
-16:00  ┌─ 评估任务B 执行
-       ├─ 条件满足 ✓
+18:00  ┌─ 依赖事件发生（FIRST_BOREHOLE_START）
+       ├─ AlertDependencyManager 处理
+       ├─ 更新 pending_escalations 状态
+       └─ 重新调度 LEVEL_2 任务
+
+20:00  ┌─ 评估任务B 执行
+       ├─ 幂等性检查通过
        ├─ 执行 EMAIL 动作
-       ├─ 计算 RED 等级触发时间（班次开始+12h）
-       └─ 创建评估任务C
-
-20:00  ┌─ 评估任务C 执行
-       ├─ 条件满足 ✓
-       ├─ 执行 SMS 动作
-       └─ 完成升级
+       └─ 继续下一等级或异常解除
 ```
 
 ## 核心特性
 
-✅ **等级逐步升级** - 从BLUE → YELLOW → RED，每次只升级一个等级
+✅ **等级逐步升级** - 从 LEVEL_1 → LEVEL_2 → LEVEL_3，每次只升级一个等级
 
-✅ **精确时间计算** - 根据触发条件精确计算下次评估时间，无需轮询
+✅ **精确时间计算** - 根据 trigger_condition JSON 精确计算下次评估时间，无需轮询
 
-✅ **灵活的触发条件** - 支持绝对时间、相对事件时间、混合条件
+✅ **依赖事件管理** - 支持等级依赖业务事件（dependent_events），延迟触发
 
-✅ **完整审计日志** - 记录每次升级的时间、原因、动作结果
+✅ **异常解除机制** - 检测到业务条件恢复时自动解除，取消所有待机任务
+
+✅ **系统恢复能力** - 服务重启后自动恢复未完成的告警流程，防止 Quartz 持久化冲突
+
+✅ **完整审计日志** - 记录每次升级、解除、任务取消的时间和原因
 
 ✅ **多样化报警动作** - 支持LOG、EMAIL、SMS、WEBHOOK等
 
+✅ **事件驱动架构** - 基于 Spring ApplicationEvent 的松耦合设计
+
 ✅ **高度可扩展** - 易于添加新的异常检测策略和报警动作
+
+✅ **幂等性保护** - 防止任务重复执行，安全可靠
 
 ✅ **与调度框架融合** - 复用现有的任务调度、分布式锁、执行日志等
 
@@ -72,25 +84,35 @@
 alert/
 ├── entity/                    # 数据实体
 │   ├── ExceptionType          # 异常类型
-│   ├── TriggerCondition       # 触发条件
-│   ├── AlertRule              # 报警规则
-│   ├── ExceptionEvent         # 异常事件
-│   └── AlertEventLog          # 报警事件日志
+│   ├── AlertRule              # 报警规则（包含 trigger_condition JSON）
+│   ├── ExceptionEvent         # 异常事件（包含 pending_escalations JSON）
+│   ├── AlertEventLog          # 报警事件日志
+│   └── DailyTaskStatistics    # 每日统计
 │
 ├── repository/                # 数据访问层
 │   ├── ExceptionTypeRepository
-│   ├── TriggerConditionRepository
 │   ├── AlertRuleRepository
 │   ├── ExceptionEventRepository
-│   └── AlertEventLogRepository
+│   ├── AlertEventLogRepository
+│   └── DailyTaskStatisticsRepository
+│
+├── enums/                     # 枚举类型
+│   ├── ExceptionStatus        # 异常状态（ACTIVE/RESOLVING/RESOLVED）
+│   └── AlertEventType         # 事件类型（TRIGGERED/RESOLVED/CANCELLED）
+│
+├── event/                     # Spring 事件系统
+│   ├── AlertSystemEvent       # 事件基类
+│   ├── AlertTriggeredEvent    # 告警触发事件
+│   ├── AlertResolvedEvent     # 告警解除事件
+│   ├── AlertRecoveredEvent    # 系统恢复事件
+│   └── DependencyEventOccurred # 依赖事件发生
 │
 ├── trigger/                   # 触发条件评估
 │   ├── TriggerStrategy        # 策略接口
 │   ├── TriggerStrategyFactory # 工厂类
 │   └── strategy/
-│       ├── AbsoluteTimeTrigger    # 绝对时间
-│       ├── RelativeEventTrigger   # 相对事件
-│       └── HybridTrigger          # 混合条件
+│       ├── TimeTrigger            # 时间触发
+│       └── ConditionTrigger       # 条件触发
 │
 ├── detection/                 # 异常检测
 │   ├── ExceptionDetectionStrategy # 策略接口
@@ -105,10 +127,13 @@ alert/
 │       └── SmsAlertAction         # 短信通知
 │
 ├── executor/                  # 集成到调度框架
-│   └── AlertExecutor          # 实现 TaskExecutor
+│   └── AlertExecutor          # 实现 TaskExecutor（含幂等性检查）
 │
-├── service/                   # 业务逻辑
-│   └── AlertEscalationService # 升级管理
+├── service/                   # 业务逻辑（核心）
+│   ├── AlertEscalationService     # 升级管理（任务创建、ID持久化）
+│   ├── AlertResolutionService     # 解除管理（任务取消、状态转换）
+│   ├── AlertDependencyManager     # 依赖事件管理
+│   └── AlertRecoveryService       # 系统恢复（启动时清理旧任务）
 │
 └── controller/                # API 接口
     └── AlertRuleController    # REST API
@@ -117,12 +142,12 @@ alert/
 ## 数据库表
 
 - `exception_type` - 异常类型定义
-- `trigger_condition` - 触发条件配置
-- `alert_rule` - 报警规则
-- `exception_event` - 异常事件
-- `alert_event_log` - 报警日志（审计）
+- `alert_rule` - 报警规则（包含 trigger_condition 和 dependent_events JSON 字段）
+- `exception_event` - 异常事件（包含 pending_escalations JSON 字段，存储任务ID）
+- `alert_event_log` - 报警日志（审计：TRIGGERED/RESOLVED/CANCELLED）
+- `daily_task_statistics` - 每日任务统计
 
-详见 [alert-schema.sql](../src/main/resources/alert-schema.sql)
+详见 [ALERT_DB_SCHEMA.md](ALERT_DB_SCHEMA.md) 和数据库迁移脚本
 
 ## 快速开始
 
