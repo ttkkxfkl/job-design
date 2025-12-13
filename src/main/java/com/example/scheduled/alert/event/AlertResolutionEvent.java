@@ -1,7 +1,6 @@
 package com.example.scheduled.alert.event;
 
 import com.example.scheduled.alert.constant.AlertConstants;
-import com.example.scheduled.alert.enums.ResolutionSource;
 import lombok.Getter;
 
 /**
@@ -11,7 +10,6 @@ import lombok.Getter;
 @Getter
 public class AlertResolutionEvent extends AlertSystemEvent {
 
-    private final ResolutionSource resolutionSource;
     private final String resolutionReason;
 
     /**
@@ -21,25 +19,21 @@ public class AlertResolutionEvent extends AlertSystemEvent {
             Object source,
             Long exceptionEventId,
             String businessId,
-            String businessType,
-            ResolutionSource resolutionSource,
-            String resolutionReason) {
+            String businessType) {
         super(source, exceptionEventId, AlertConstants.AlertEventType.ALERT_RESOLVED, businessId, businessType);
-        this.resolutionSource = resolutionSource;
-        this.resolutionReason = resolutionReason;
+        this.resolutionReason = null;
     }
-    
+
     /**
-     * 兼容构造函数（不推荐）
+     * 兼容构造函数 - 包含解除原因
      */
-    @Deprecated
     public AlertResolutionEvent(
             Object source,
             Long exceptionEventId,
-            ResolutionSource resolutionSource,
+            String businessId,
+            String businessType,
             String resolutionReason) {
-        super(source, exceptionEventId, AlertConstants.AlertEventType.ALERT_RESOLVED);
-        this.resolutionSource = resolutionSource;
+        super(source, exceptionEventId, AlertConstants.AlertEventType.ALERT_RESOLVED, businessId, businessType);
         this.resolutionReason = resolutionReason;
     }
 }

@@ -1,7 +1,6 @@
 package com.example.scheduled.alert.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.ExceptionEvent;
 import com.example.scheduled.alert.event.AlertSystemEvent;
 import com.example.scheduled.alert.repository.ExceptionEventRepository;
@@ -207,37 +206,54 @@ public class AlertDependencyManager {
                     continue;
                 }
 
-                // 第一步：检查所有依赖事件是否都已发生（不考虑时间延迟）
-                boolean eventsSatisfied = checkAllEventsOccurred(levelStatus, exceptionEvent);
-                if (!eventsSatisfied) {
-                    log.debug("报警升级依赖事件未满足: exceptionEventId={}, level={}",
+                Object depsObj = levelStatus.get(DEPENDENCIES);
+                Object hybridIdObj = levelStatus.get("hybridConditionId");
+
+                // 情况1：正常情况，有 dependencies 字段
+                if (depsObj instanceof List && !((List<?>) depsObj).isEmpty()) {
+                    // 第一步：检查所有依赖事件是否都已发生（不考虑时间延迟）
+                    boolean eventsSatisfied = checkAllEventsOccurred(levelStatus, exceptionEvent);
+                    if (!eventsSatisfied) {
+                        log.debug("报警升级依赖事件未满足: exceptionEventId={}, level={}",
+                                exceptionEvent.getId(), levelName);
+                        continue;
+                    }
+
+                    log.info("报警升级依赖事件已满足: exceptionEventId={}, level={}, triggeringEvent={}",
+                            exceptionEvent.getId(), levelName, triggeringEvent.getEventType());
+
+                    // 第二步：计算最晚需要等待的时间（考虑所有依赖的延迟时间）
+                    LocalDateTime maxRequiredTime = calculateMaxRequiredTime(levelStatus, exceptionEvent);
+
+                    // 第三步：更新 pending_escalations 状态为 READY
+                    levelStatus.put(STATUS, READY);
+                    levelStatus.put(READY_AT, LocalDateTime.now().toString());
+                    if (maxRequiredTime != null) {
+                        levelStatus.put("scheduledTime", maxRequiredTime.toString());
+                    }
+                    exceptionEventRepository.updateById(exceptionEvent);
+
+                    // 第四步：根据时间决定立即执行还是延迟执行
+                    LocalDateTime scheduleTime = (maxRequiredTime != null && LocalDateTime.now().isBefore(maxRequiredTime))
+                            ? maxRequiredTime
+                            : LocalDateTime.now();
+
+                    alertEscalationService.scheduleEscalationEvaluation(exceptionEvent.getId(), levelName, scheduleTime);
+                    
+                    if (scheduleTime.isAfter(LocalDateTime.now())) {
+                        log.info("延迟调度等级 [{}] 评估任务于 {}: exceptionEventId={}", levelName, scheduleTime, exceptionEvent.getId());
+                    } else {
+                        log.info("立即调度等级 [{}] 评估任务: exceptionEventId={}", levelName, exceptionEvent.getId());
+                    }
+                }
+                // 情况2：混合条件降级
+                else if (hybridIdObj != null) {
+                    log.warn("发现混合条件降级状态，暂不处理: exceptionEventId={}, level={}, hybridConditionId={}",
+                            exceptionEvent.getId(), levelName, hybridIdObj);
+                }
+                else {
+                    log.warn("待机等级缺少依赖信息: exceptionEventId={}, level={}",
                             exceptionEvent.getId(), levelName);
-                    continue;
-                }
-
-                log.info("报警升级依赖事件已满足: exceptionEventId={}, level={}, triggeringEvent={}",
-                        exceptionEvent.getId(), levelName, triggeringEvent.getEventType());
-
-                // 第二步：计算最晚需要等待的时间（考虑所有依赖的延迟时间）
-                LocalDateTime maxRequiredTime = calculateMaxRequiredTime(levelStatus, exceptionEvent);
-
-                // 第三步：更新 pending_escalations 状态为 READY
-                levelStatus.put(STATUS, READY);
-                levelStatus.put(READY_AT, LocalDateTime.now().toString());
-                if (maxRequiredTime != null) {
-                    levelStatus.put("scheduledTime", maxRequiredTime.toString());
-                }
-                exceptionEventRepository.updateById(exceptionEvent);
-
-                // 第四步：根据时间决定立即执行还是延迟执行
-                if (maxRequiredTime != null && LocalDateTime.now().isBefore(maxRequiredTime)) {
-                    // 时间未到，创建延迟任务
-                    alertEscalationService.scheduleEscalationEvaluation(exceptionEvent.getId(), levelName, maxRequiredTime);
-                    log.info("延迟调度等级 [{}] 评估任务于 {}: exceptionEventId={}", levelName, maxRequiredTime, exceptionEvent.getId());
-                } else {
-                    // 时间已到或无延迟要求，立即执行
-                    alertEscalationService.scheduleEscalationEvaluation(exceptionEvent.getId(), levelName);
-                    log.info("已为等级 [{}] 创建升级评估任务(立即): exceptionEventId={}", levelName, exceptionEvent.getId());
                 }
             }
 
@@ -273,7 +289,6 @@ public class AlertDependencyManager {
                 return false;
             }
 
-            @SuppressWarnings("unchecked")
             List<Object> dependencies = (List<Object>) depsObj;
             String logicalOperator = (String) levelStatus.getOrDefault(LOGICAL_OPERATOR, AND);
 
@@ -328,7 +343,6 @@ public class AlertDependencyManager {
      * @return true 表示事件已发生，false 表示事件未发生
      * }
      */
-    @SuppressWarnings("unchecked")
     private boolean checkEventOccurred(Map<String, Object> dependency, ExceptionEvent event) {
         try {
             String eventType = (String) dependency.get(EVENT_TYPE);
@@ -364,7 +378,6 @@ public class AlertDependencyManager {
      * @param event       异常事件
      * @return 最晚需要等待到的时间，如果无需等待则返回 null
      */
-    @SuppressWarnings("unchecked")
     private LocalDateTime calculateMaxRequiredTime(Map<String, Object> levelStatus, ExceptionEvent event) {
         LocalDateTime maxRequiredTime = null;
 
@@ -373,7 +386,6 @@ public class AlertDependencyManager {
             if (!(depsObj instanceof List)) {
                 return null;
             }
-
             @SuppressWarnings("unchecked")
             List<Object> dependencies = (List<Object>) depsObj;
 
@@ -384,6 +396,7 @@ public class AlertDependencyManager {
 
                 @SuppressWarnings("unchecked")
                 Map<String, Object> dep = (Map<String, Object>) depObj;
+
                 String depEventType = (String) dep.get(EVENT_TYPE);
                 Number delayMinutesObj = (Number) dep.get(DELAY_MINUTES);
                 int delayMinutes = delayMinutesObj != null ? delayMinutesObj.intValue() : 0;

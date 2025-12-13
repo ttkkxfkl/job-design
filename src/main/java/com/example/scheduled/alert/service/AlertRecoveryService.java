@@ -229,13 +229,30 @@ public class AlertRecoveryService {
                     Map<String, Object> levelStatus = (Map<String, Object>) levelData;
                     String status = (String) levelStatus.get("status");
                     
-                    // 如果是 WAITING 状态，需要重新检查依赖和调度
-                    if (WAITING.equals(status)) {
-                        log.info("重新调度待机等级: exceptionEventId={}, level={}", event.getId(), levelName);
+                    // WAITING 或 READY 状态都需要重新调度
+                    if (WAITING.equals(status) || "READY".equals(status)) {
+                        log.info("重新调度待机等级: exceptionEventId={}, level={}, status={}", 
+                                event.getId(), levelName, status);
                         
-                        // 重新调度评估任务
-                        // alertEscalationService 会自动检查依赖条件
-                        alertEscalationService.scheduleEscalationEvaluation(event.getId(), levelName);
+                        // 如果有明确的 scheduledTime（来自 READY 状态），使用该时间
+                        Object scheduledTimeStr = levelStatus.get("scheduledTime");
+                        if (scheduledTimeStr != null && "READY".equals(status)) {
+                            try {
+                                java.time.LocalDateTime scheduledTime = 
+                                    java.time.LocalDateTime.parse(scheduledTimeStr.toString());
+                                alertEscalationService.scheduleEscalationEvaluation(
+                                    event.getId(), levelName, scheduledTime);
+                                log.info("以指定时间重新调度READY等级: level={}, scheduledTime={}", 
+                                        levelName, scheduledTime);
+                            } catch (Exception parseEx) {
+                                log.warn("解析scheduledTime失败，降级为立即调度: scheduledTime={}", 
+                                        scheduledTimeStr, parseEx);
+                                alertEscalationService.scheduleEscalationEvaluation(event.getId(), levelName);
+                            }
+                        } else {
+                            // WAITING 状态或 READY 状态但无 scheduledTime，立即调度
+                            alertEscalationService.scheduleEscalationEvaluation(event.getId(), levelName);
+                        }
                     }
                 }
             }

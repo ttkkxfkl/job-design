@@ -1,6 +1,5 @@
 package com.example.scheduled.alert.controller;
 
-import com.example.scheduled.alert.enums.ResolutionSource;
 import com.example.scheduled.alert.service.AlertResolutionService;
 import com.example.scheduled.dto.ApiResponse;
 import lombok.RequiredArgsConstructor;
@@ -24,29 +23,19 @@ public class AlertResolutionController {
      * 支持多种解除来源：手动解除、自动恢复、系统取消
      *
      * @param exceptionEventId 异常事件ID
-     * @param resolutionSource 解除来源 (MANUAL_RESOLUTION / AUTO_RECOVERY / SYSTEM_CANCEL)
      * @param resolutionReason 解除原因
      * @return 解除结果
      */
     @PostMapping("/resolve")
     public ApiResponse<?> resolveAlert(
             @RequestParam Long exceptionEventId,
-            @RequestParam String resolutionSource,
             @RequestParam String resolutionReason) {
         try {
-            log.info("接收报警解除请求: exceptionEventId={}, source={}, reason={}",
-                    exceptionEventId, resolutionSource, resolutionReason);
-
-            ResolutionSource source;
-            try {
-                source = ResolutionSource.valueOf(resolutionSource);
-            } catch (IllegalArgumentException e) {
-                return ApiResponse.error("无效的解除来源: " + resolutionSource);
-            }
+            log.info("接收报警解除请求: exceptionEventId={}, reason={}",
+                    exceptionEventId, resolutionReason);
 
             boolean success = alertResolutionService.resolveAlert(
                     exceptionEventId,
-                    source,
                     resolutionReason
             );
 

@@ -1,7 +1,5 @@
 package com.example.scheduled.alert.detection;
 
-import com.example.scheduled.alert.entity.ExceptionEvent;
-
 import java.util.Map;
 
 /**

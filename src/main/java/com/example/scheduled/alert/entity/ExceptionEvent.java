@@ -1,8 +1,6 @@
 package com.example.scheduled.alert.entity;
 
 import com.baomidou.mybatisplus.annotation.*;
-import com.example.scheduled.alert.enums.ExceptionStatus;
-import com.example.scheduled.alert.enums.ResolutionSource;
 import com.example.scheduled.config.JsonTypeHandler;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -95,13 +93,6 @@ public class ExceptionEvent {
      * 解除来源：MANUAL_RESOLUTION(手动解除)、AUTO_RECOVERY(自动恢复)、SYSTEM_CANCEL(系统取消)
      */
     private String resolutionSource;
-
-    /**
-     * 系统启动恢复标志
-     * true: 已在系统启动时恢复过，无需再次处理
-     * false: 未恢复，启动时需要处理待机任务
-     */
-    private Boolean recoveryFlag;
 
     private LocalDateTime createdAt;
 

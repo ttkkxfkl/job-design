@@ -1,7 +1,6 @@
 package com.example.scheduled.alert.action.impl;
 
 import com.example.scheduled.alert.action.AlertActionExecutor;
-import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.AlertRule;
 import com.example.scheduled.alert.entity.ExceptionEvent;
 import lombok.extern.slf4j.Slf4j;

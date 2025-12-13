@@ -24,6 +24,7 @@ import java.util.Map;
 import static com.example.scheduled.alert.constant.AlertConstants.ActionStatus.SENT;
 import static com.example.scheduled.alert.constant.AlertConstants.Defaults.*;
 import static com.example.scheduled.alert.constant.AlertConstants.PendingEscalationStatus.WAITING;
+import static com.example.scheduled.alert.constant.AlertConstants.TriggerType.*;
 
 /**
  * 报警升级服务 - 负责报警的升级流程和评估任务的创建
@@ -87,13 +88,30 @@ public class AlertEscalationService {
 
             // 如果策略返回 null，尝试闭环处理：
             // 1) 对相对事件：根据 detection_context 推导触发时间；缺少事件时写入 WAITING
-            // 2) 其他情况：记录警告并跳过
+            // 2) 混合条件：遍历子条件并取最早时间；无法恢复则写入 WAITING
+            // 3) 绝对时间：不应返回 null，否则记警告
             if (nextEvaluationTime == null) {
-                LocalDateTime recoveredTime = recoverRelativeTriggerTime(condition, event, rule);
-                if (recoveredTime == null) {
+                String conditionType = condition.getConditionType();
+                if (RELATIVE.equals(conditionType)) {
+                    LocalDateTime recoveredTime = recoverRelativeTriggerTime(condition, event, rule);
+                    if (recoveredTime == null) {
+                        // recoverRelativeTriggerTime 中已经写入 WAITING，直接返回
+                        return;
+                    }
+                    nextEvaluationTime = recoveredTime;
+                } else if (HYBRID.equals(conditionType)) {
+                    LocalDateTime recoveredTime = recoverHybridTriggerTime(condition, event, rule);
+                    if (recoveredTime == null) {
+                        // recoverHybridTriggerTime 无法恢复，需要降级为 WAITING
+                        writeWaitingPendingForHybrid(event, rule, condition);
+                        return;
+                    }
+                    nextEvaluationTime = recoveredTime;
+                } else {
+                    log.warn("无法计算下一次评估时间且无补偿: exceptionEventId={}, ruleId={}, type={}",
+                            event.getId(), rule.getId(), conditionType);
                     return;
                 }
-                nextEvaluationTime = recoveredTime;
             }
 
             // 构造任务数据
@@ -163,6 +181,60 @@ public class AlertEscalationService {
     }
 
     /**
+     * 对混合条件进行补偿：
+     * - 遍历子条件，取可恢复的最早触发时间
+     * - 子条件为相对事件且缺少上下文时，降级为 WAITING 写入依赖
+     */
+    private LocalDateTime recoverHybridTriggerTime(TriggerCondition condition, ExceptionEvent event, AlertRule rule) {
+        if (condition.getCombinedConditionIds() == null) {
+            log.warn("混合条件缺少子条件ID: exceptionEventId={}, ruleId={}, level={}",
+                    event.getId(), rule.getId(), rule.getLevel());
+            return null;
+        }
+
+        List<Long> conditionIds = parseConditionIds(condition.getCombinedConditionIds());
+        if (conditionIds.isEmpty()) {
+            log.warn("混合条件子条件列表为空: exceptionEventId={}, ruleId={}, level={}",
+                    event.getId(), rule.getId(), rule.getLevel());
+            return null;
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime earliest = null;
+
+        for (Long id : conditionIds) {
+            TriggerCondition subCondition = triggerConditionRepository.selectById(id);
+            if (subCondition == null) {
+                continue;
+            }
+
+            TriggerStrategy subStrategy = triggerStrategyFactory.createStrategy(subCondition);
+            LocalDateTime subNext = subStrategy.calculateNextEvaluationTime(subCondition, event, now);
+
+            if (subNext != null) {
+                if (earliest == null || subNext.isBefore(earliest)) {
+                    earliest = subNext;
+                }
+                continue;
+            }
+
+            if (RELATIVE.equals(subCondition.getConditionType())) {
+                LocalDateTime recovered = recoverRelativeTriggerTime(subCondition, event, rule);
+                if (recovered != null && (earliest == null || recovered.isBefore(earliest))) {
+                    earliest = recovered;
+                }
+            }
+        }
+
+        if (earliest == null) {
+            log.warn("混合条件未能恢复评估时间: exceptionEventId={}, ruleId={}, level={}",
+                    event.getId(), rule.getId(), rule.getLevel());
+        }
+
+        return earliest;
+    }
+
+    /**
      * 从 detection_context 解析事件时间，支持字符串存储。
      */
     private LocalDateTime extractEventTime(ExceptionEvent event, String eventType) {
@@ -186,6 +258,11 @@ public class AlertEscalationService {
 
     /**
      * 将当前等级写入 pending_escalations 为 WAITING，等待相对事件到达。
+     * 
+     * 设计说明（增量更新机制）：
+     * - 如果该等级不存在，首次创建并设置 status=WAITING
+     * - 如果已存在且是 WAITING，则增量追加 dependency，避免覆盖
+     * - 支持混合条件中多个相对事件都缺失时的场景
      */
     private void writeWaitingPending(ExceptionEvent event, AlertRule rule, TriggerCondition condition) {
         Map<String, Object> pending = event.getPendingEscalations();
@@ -195,30 +272,119 @@ public class AlertEscalationService {
 
         @SuppressWarnings("unchecked")
         Map<String, Object> levelStatus = (Map<String, Object>) pending.get(rule.getLevel());
+        boolean isNewLevel = (levelStatus == null);
         if (levelStatus == null) {
             levelStatus = new HashMap<>();
             pending.put(rule.getLevel(), levelStatus);
         }
 
-        levelStatus.put("status", WAITING);
-        levelStatus.put("createdAt", LocalDateTime.now().toString());
+        // 仅在首次写入时设置 status 和 createdAt
+        if (isNewLevel) {
+            levelStatus.put("status", WAITING);
+            levelStatus.put("createdAt", LocalDateTime.now().toString());
+        }
 
-        // 写入依赖信息，供 AlertDependencyManager 后续检查
-        List<Map<String, Object>> dependencies = new java.util.ArrayList<>();
+        // 构造当前条件的依赖项
         Map<String, Object> dep = new HashMap<>();
         dep.put("eventType", condition.getRelativeEventType());
         dep.put("delayMinutes", condition.getRelativeDurationMinutes());
         dep.put("required", true);
+
+        // 增量追加依赖（而不是覆盖）
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> dependencies = (List<Map<String, Object>>) levelStatus.get("dependencies");
+        if (dependencies == null) {
+            dependencies = new java.util.ArrayList<>();
+        } else {
+            // 检查重复，避免同一事件类型的依赖被重复添加
+            boolean exists = dependencies.stream()
+                    .anyMatch(d -> condition.getRelativeEventType().equals(d.get("eventType")));
+            if (exists) {
+                // 依赖已存在，仍然需要更新时间戳表示曾被检查过
+                levelStatus.put("updatedAt", LocalDateTime.now().toString());
+                event.setPendingEscalations(pending);
+                exceptionEventRepository.updateById(event);
+                log.debug("依赖已存在，跳过重复添加但更新时间戳: level={}, eventType={}",
+                        rule.getLevel(), condition.getRelativeEventType());
+                return;
+            }
+        }
         dependencies.add(dep);
         levelStatus.put("dependencies", dependencies);
-        levelStatus.put("logicalOperator", "AND");
+
+        // 仅在首次或尚未设置时，写入逻辑操作符
+        if (!levelStatus.containsKey("logicalOperator")) {
+            levelStatus.put("logicalOperator", "AND");
+        }
+
+        // 更新时间戳
+        levelStatus.put("updatedAt", LocalDateTime.now().toString());
 
         event.setPendingEscalations(pending);
         exceptionEventRepository.updateById(event);
+        
+        log.info("已写入待机状态: level={}, eventType={}, isNewLevel={}, totalDependencies={}",
+                rule.getLevel(), condition.getRelativeEventType(), isNewLevel, dependencies.size());
+    }
+
+    /**
+     * 对混合条件无法恢复时，将整个混合条件作为待机状态（不展开子条件的依赖）
+     * 仅在 recoverHybridTriggerTime 完全失败时调用
+     */
+    private void writeWaitingPendingForHybrid(ExceptionEvent event, AlertRule rule, TriggerCondition condition) {
+        Map<String, Object> pending = event.getPendingEscalations();
+        if (pending == null) {
+            pending = new HashMap<>();
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> levelStatus = (Map<String, Object>) pending.get(rule.getLevel());
+        boolean isNewLevel = (levelStatus == null);
+        if (levelStatus == null) {
+            levelStatus = new HashMap<>();
+            pending.put(rule.getLevel(), levelStatus);
+        }
+
+        // 仅在首次写入时设置 status
+        if (isNewLevel) {
+            levelStatus.put("status", WAITING);
+            levelStatus.put("createdAt", LocalDateTime.now().toString());
+        }
+
+        // 记录混合条件的ID和逻辑操作符，供后续 AlertDependencyManager 识别
+        levelStatus.put("hybridConditionId", condition.getId());
+        levelStatus.put("hybridLogicalOperator", condition.getLogicalOperator());
+        levelStatus.put("updatedAt", LocalDateTime.now().toString());
+
+        event.setPendingEscalations(pending);
+        exceptionEventRepository.updateById(event);
+        
+        log.warn("混合条件无法恢复，已写入待机状态: level={}, hybridConditionId={}, logicalOp={}",
+                rule.getLevel(), condition.getId(), condition.getLogicalOperator());
+    }
+
+    private List<Long> parseConditionIds(String idString) {
+        if (idString == null || idString.trim().isEmpty()) {
+            return List.of();
+        }
+
+        String[] parts = idString.split(",");
+        List<Long> ids = new java.util.ArrayList<>();
+        for (String part : parts) {
+            try {
+                ids.add(Long.parseLong(part.trim()));
+            } catch (NumberFormatException ex) {
+                log.warn("无效的条件ID: {}", part);
+            }
+        }
+        return ids;
     }
     
     /**
      * 更新 pending_escalations，添加任务ID（用于恢复和取消）
+     * 
+     * 注意：仅更新taskId/scheduledTime/updatedAt，不修改status和dependencies
+     * 这样可以保持WAITING状态的原始依赖信息
      */
     private void updatePendingEscalationsWithTaskId(ExceptionEvent event, String level, 
                                                      String taskId, LocalDateTime scheduledTime) {
@@ -230,11 +396,14 @@ public class AlertEscalationService {
         @SuppressWarnings("unchecked")
         Map<String, Object> levelStatus = (Map<String, Object>) pendingEscalations.get(level);
         if (levelStatus == null) {
+            // 如果该等级还未记录，创建新的记录，这种情况应该很少发生（因为通常已由recoverXxx方法写入）
             levelStatus = new HashMap<>();
+            levelStatus.put("status", "SCHEDULED");  // 标记为已调度，与WAITING区分
+            levelStatus.put("createdAt", LocalDateTime.now().toString());
             pendingEscalations.put(level, levelStatus);
         }
 
-        // 添加任务ID和调度时间
+        // 仅更新任务相关字段，不修改状态和依赖信息
         levelStatus.put("taskId", taskId);
         levelStatus.put("scheduledTime", scheduledTime.toString());
         levelStatus.put("updatedAt", LocalDateTime.now().toString());
@@ -374,6 +543,7 @@ public class AlertEscalationService {
      * Schedule an escalation evaluation at an explicit trigger time.
      * This is used when a dependency event occurred with a required delay (delayMinutes > 0).
      */
+    @Transactional
     public void scheduleEscalationEvaluation(Long exceptionEventId, String levelName, LocalDateTime triggerTime) {
         Map<String, Object> taskData = new HashMap<>();
         taskData.put("exceptionEventId", exceptionEventId);

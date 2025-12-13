@@ -2,7 +2,6 @@ package com.example.scheduled.alert.executor;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.example.scheduled.alert.action.AlertActionExecutor;
-import com.example.scheduled.alert.constant.AlertConstants;
 import com.example.scheduled.alert.entity.AlertEventLog;
 import com.example.scheduled.alert.entity.AlertRule;
 import com.example.scheduled.alert.entity.ExceptionEvent;
@@ -58,9 +57,23 @@ public class AlertExecutor implements TaskExecutor {
     public void execute(ScheduledTask task) throws Exception {
         Map<String, Object> taskData = task.getTaskData();
         Long exceptionEventId = ((Number) taskData.get("exceptionEventId")).longValue();
-        Long alertRuleId = ((Number) taskData.get("alertRuleId")).longValue();
+        
+        // 支持两种模式：
+        // 模式1：从 alertRuleId 直接查询规则（初始调度）
+        // 模式2：从 levelName 查询规则（依赖管理器调度或恢复调度）
+        Long alertRuleId = null;
+        final String[] levelNameHolder = {null};
+        
+        if (taskData.containsKey("alertRuleId")) {
+            alertRuleId = ((Number) taskData.get("alertRuleId")).longValue();
+        } else if (taskData.containsKey("levelName")) {
+            levelNameHolder[0] = (String) taskData.get("levelName");
+        } else {
+            log.error("任务数据缺少alertRuleId或levelName: exceptionEventId={}", exceptionEventId);
+            return;
+        }
 
-        log.info("开始执行报警评估任务: 异常[{}] 规则[{}]", exceptionEventId, alertRuleId);
+        log.info("开始执行报警评估任务: 异常[{}] ruleId={} levelName={}", exceptionEventId, alertRuleId, levelNameHolder[0]);
 
         try {
             // 1. 获取异常事件和报警规则
@@ -70,10 +83,25 @@ public class AlertExecutor implements TaskExecutor {
                 return;
             }
 
-            AlertRule rule = alertRuleRepository.selectById(alertRuleId);
-            if (rule == null) {
-                log.warn("报警规则 [{}] 不存在", alertRuleId);
-                return;
+            AlertRule rule;
+            if (alertRuleId != null) {
+                rule = alertRuleRepository.selectById(alertRuleId);
+                if (rule == null) {
+                    log.warn("报警规则 [{}] 不存在", alertRuleId);
+                    return;
+                }
+            } else {
+                // 从 levelName 查询规则
+                final String finalLevelName = levelNameHolder[0];
+                List<AlertRule> rules = alertRuleRepository.findEnabledRulesByExceptionType(event.getExceptionTypeId());
+                rule = rules.stream()
+                        .filter(r -> r.getLevel().equals(finalLevelName))
+                        .findFirst()
+                        .orElse(null);
+                if (rule == null) {
+                    log.warn("异常类型 [{}] 的等级 [{}] 规则不存在", event.getExceptionTypeId(), finalLevelName);
+                    return;
+                }
             }
 
             // 【关键】幂等性检查：如果事件已解除，跳过执行
@@ -99,12 +127,6 @@ public class AlertExecutor implements TaskExecutor {
 
             if (!isExceptionStillActive(exceptionType, event)) {
                 log.info("异常事件 [{}] 当前未满足业务检测逻辑，跳过本次告警评估", exceptionEventId);
-                return;
-            }
-
-            // 2. 检查异常是否已解决
-            if ("RESOLVED".equals(event.getStatus())) {
-                log.info("异常事件 [{}] 已解决，跳过评估", exceptionEventId);
                 return;
             }
 
@@ -186,11 +208,12 @@ public class AlertExecutor implements TaskExecutor {
                 .calculateNextEvaluationTime(condition, event, now);
 
         if (nextEvaluationTime != null && nextEvaluationTime.isAfter(now)) {
-            // 情况1: 时间未到（调度偏差或时间窗口限制），重新调度
-            log.warn("触发时间未到，重新调度评估任务: 异常[{}] 规则[{}] 下次时间[{}]",
+            // 情况1: 时间未到（调度偏差或时间窗口限制），创建延迟任务
+            log.warn("触发时间未到，创建延迟评估任务: 异常[{}] 规则[{}] 下次时间[{}]",
                     event.getId(), rule.getId(), nextEvaluationTime);
             
-            alertEscalationService.createEvaluationTask(event, rule);
+            // 使用三参数版本直接指定时间，避免触发策略重新计算
+            alertEscalationService.scheduleEscalationEvaluation(event.getId(), rule.getLevel(), nextEvaluationTime);
             
         } else {
             // 情况2: 其他异常（数据问题/策略bug）
