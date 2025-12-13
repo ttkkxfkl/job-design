@@ -27,6 +27,11 @@ import static com.example.scheduled.alert.constant.AlertConstants.PendingEscalat
  * 1. 系统在 RESOLVING 状态下崩溃 -> 恢复为 RESOLVED
  * 2. 系统在等待事件状态下崩溃 -> 重新调度待机任务
  * 3. 系统在执行任务状态下崩溃 -> 继续执行任务
+ * 
+ * 设计原则：
+ * - 不依赖 recovery_flag 字段（已废弃）
+ * - 基于 pending_escalations 实际状态（WAITING/READY）判断是否需要恢复
+ * - 支持多次崩溃恢复，每次启动都检查实际状态
  */
 @Slf4j
 @Service
@@ -56,23 +61,30 @@ public class AlertRecoveryService {
     /**
      * 执行告警系统恢复
      * 核心逻辑：
-     * 1. 查找所有 ACTIVE 且 recovery_flag = false 的异常事件
-     * 2. 对每个异常事件进行恢复处理
-     * 3. 更新 recovery_flag 为 true，防止重复恢复
+     * 1. 查找所有 ACTIVE 状态的异常事件
+     * 2. 基于 pending_escalations 实际状态判断是否需要恢复（有 WAITING/READY 状态）
+     * 3. 对需要恢复的异常事件重新调度任务
+     * 
+     * 注意：已废弃 recovery_flag 字段，改用 pending_escalations 状态作为判断依据
      */
     @Transactional(rollbackFor = Exception.class)
     public void recoverAlertSystem() {
         try {
             // 1. 查询所有待恢复的异常事件
-            // 条件：status = ACTIVE AND recovery_flag = false
-            List<ExceptionEvent> pendingRecoveryEvents = exceptionEventRepository.selectList(
+            // 条件：status = ACTIVE（不再依赖 recovery_flag，而是检查 pending_escalations 状态）
+            List<ExceptionEvent> activeEvents = exceptionEventRepository.selectList(
                     new LambdaQueryWrapper<ExceptionEvent>()
                             .eq(ExceptionEvent::getStatus, ExceptionStatus.ACTIVE.name())
-                            .eq(ExceptionEvent::getRecoveryFlag, false)
                             .orderByAsc(ExceptionEvent::getCreatedAt)
             );
 
-            log.info("发现 {} 个待恢复的异常事件", pendingRecoveryEvents.size());
+            // 过滤出真正需要恢复的事件：有 WAITING 或 READY 状态的待机升级
+            List<ExceptionEvent> pendingRecoveryEvents = activeEvents.stream()
+                    .filter(event -> hasUnfinishedEscalations(event))
+                    .toList();
+
+            log.info("发现 {} 个待恢复的异常事件（共 {} 个ACTIVE事件）", 
+                    pendingRecoveryEvents.size(), activeEvents.size());
 
             int successCount = 0;
             int failureCount = 0;
@@ -116,19 +128,19 @@ public class AlertRecoveryService {
 
     /**
      * 恢复单个异常事件
+     * 注意：此方法在 recoverAlertSystem() 的事务中执行
      * 
      * @param event 异常事件
      */
-    @Transactional(rollbackFor = Exception.class)
     private void recoverSingleEvent(ExceptionEvent event) {
         log.info("开始恢复异常事件: id={}, level={}, createdAt={}", 
                 event.getId(), event.getCurrentAlertLevel(), event.getCreatedAt());
 
         try {
-            // 【关键】步骤1: 清理Quartz中的旧任务，避免与新任务重复执行
+            // 【关键】步骤1: 清理调度系统中的旧任务，避免与新任务重复执行
             if (event.getPendingEscalations() != null && !event.getPendingEscalations().isEmpty()) {
-                cleanupOldQuartzTasks(event);
-                log.info("已清理旧的Quartz任务: exceptionEventId={}", event.getId());
+                cleanupOldScheduledTasks(event);
+                log.info("已清理旧的调度任务: exceptionEventId={}", event.getId());
             }
 
             // 步骤2: 根据 pending_escalations 重新调度所有待机的升级任务
@@ -137,11 +149,10 @@ public class AlertRecoveryService {
                 log.info("已重新调度待机升级任务: exceptionEventId={}", event.getId());
             }
 
-            // 步骤3: 标记为已恢复
-            event.setRecoveryFlag(true);
-            exceptionEventRepository.updateById(event);
+            // 注意：不再设置 recovery_flag，而是依靠 pending_escalations 状态判断
+            // 当所有级别都完成（不再有 WAITING/READY 状态）时，自然不会再恢复
 
-            // 步骤4: 发布恢复事件
+            // 步骤3: 发布恢复事件
             eventPublisher.publishEvent(new AlertRecoveredEvent(
                     this,
                     event.getId(),
@@ -160,10 +171,10 @@ public class AlertRecoveryService {
     }
     
     /**
-     * 清理Quartz中的旧任务
-     * 防止旧任务与新任务重复执行（解决Quartz持久化冲突）
+     * 清理调度系统中的旧任务
+     * 防止旧任务与新任务重复执行（适用于 Quartz 持久化模式和 Simple 内存模式）
      */
-    private void cleanupOldQuartzTasks(ExceptionEvent event) {
+    private void cleanupOldScheduledTasks(ExceptionEvent event) {
         for (String levelName : event.getPendingEscalations().keySet()) {
             Object levelData = event.getPendingEscalations().get(levelName);
             
@@ -233,6 +244,33 @@ public class AlertRecoveryService {
             log.error("重新调度待机升级任务时出现异常: exceptionEventId={}", event.getId(), e);
             // 不抛出异常，继续处理其他任务
         }
+    }
+
+    /**
+     * 检查异常事件是否有未完成的升级任务
+     * 
+     * @param event 异常事件
+     * @return true 表示有 WAITING 或 READY 状态的待机升级，需要恢复
+     */
+    private boolean hasUnfinishedEscalations(ExceptionEvent event) {
+        if (event.getPendingEscalations() == null || event.getPendingEscalations().isEmpty()) {
+            return false;
+        }
+
+        for (Object levelData : event.getPendingEscalations().values()) {
+            if (levelData instanceof Map) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> levelStatus = (Map<String, Object>) levelData;
+                String status = (String) levelStatus.get("status");
+                
+                // WAITING 或 READY 状态表示还未完成
+                if (WAITING.equals(status) || "READY".equals(status)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     /**

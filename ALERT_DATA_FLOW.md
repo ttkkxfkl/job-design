@@ -387,9 +387,23 @@ id | exceptionTypeId | detectedAt | detection_context (JSON) | currentAlertLevel
     ],
     "logicalOperator": "AND",
     "createdAt": "2025-12-12T10:02:00"
+  },
+  "RED": {
+    "status": "READY",
+    "readyAt": "2025-12-12T10:30:00",
+    "scheduledTime": "2025-12-12T12:30:00",
+    "taskId": "67890",
+    "dependencies": [],
+    "logicalOperator": "AND"
   }
 }
 ```
+
+**字段说明**:
+- `status`: WAITING(等待依赖) | READY(已调度) | COMPLETED(已执行)
+- `readyAt`: 依赖满足时间
+- `scheduledTime`: 计划执行时间（考虑延迟）
+- `taskId`: 调度系统中的任务ID，用于取消任务
 
 ---
 
@@ -461,12 +475,12 @@ graph TD
     START["🚀 应用启动<br/>ApplicationReadyEvent"]
     
     subgraph "恢复逻辑"
-        R1["1️⃣ 查询 ACTIVE 异常<br/>status = ACTIVE<br/>recovery_flag = false"]
+        R1["1️⃣ 查询 ACTIVE 异常<br/>status = ACTIVE<br/>过滤有 WAITING/READY 状态"]
         R2["查到异常列表"]
         R3["2️⃣ 逐个恢复异常"]
         R4["3️⃣ 对每个异常检查<br/>pending_escalations"]
         R5["4️⃣ 重新调度待机任务<br/>scheduleEscalationEvaluation"]
-        R6["5️⃣ 标记已恢复<br/>recovery_flag = true"]
+        R6["5️⃣ 基于状态判断<br/>pending_escalations<br/>无需标记字段"]
         R7["6️⃣ 发布恢复事件<br/>AlertRecoveredEvent"]
     end
 

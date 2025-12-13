@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -112,6 +113,10 @@ public class AlertRuleController {
     public ApiResponse<?> getRulesByExceptionType(@PathVariable Long exceptionTypeId) {
         try {
             List<AlertRule> rules = alertRuleRepository.findEnabledRulesByExceptionType(exceptionTypeId);
+            // 按等级优先级排序（从低到高）
+            // BLUE/LEVEL_1 (priority=1) < YELLOW/LEVEL_2 (priority=2) < RED/LEVEL_3 (priority=3)
+            rules.sort(Comparator.comparingInt((AlertRule rule) -> AlertConstants.AlertLevels.getPriority(rule.getLevel()))
+                                 .thenComparingLong(AlertRule::getId));
             return ApiResponse.success("查询成功", rules);
         } catch (Exception e) {
             log.error("查询报警规则失败", e);

@@ -1,15 +1,13 @@
 package com.example.scheduled.alert.event;
 
-import lombok.Data;
-import lombok.EqualsAndHashCode;
+import lombok.*;
 import org.springframework.context.ApplicationEvent;
 
 /**
  * 告警系统事件基类
  * 所有告警系统内的事件都应该继承自这个类
  */
-@EqualsAndHashCode(callSuper = true)
-@Data
+@Getter
 public abstract class AlertSystemEvent extends ApplicationEvent {
 
     /**

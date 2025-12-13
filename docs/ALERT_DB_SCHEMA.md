@@ -26,7 +26,7 @@ CREATE TABLE IF NOT EXISTS exception_event (
   resolution_reason VARCHAR(255) NULL COMMENT '解除原因',
   resolution_source VARCHAR(64) NULL COMMENT '解除来源：MANUAL/AUTO',
   last_escalated_at DATETIME NULL COMMENT '最近升级时间',
-  recovery_flag TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已恢复处理过',
+  recovery_flag TINYINT(1) NOT NULL DEFAULT 0 COMMENT '【已废弃】原用于标记已恢复',
   detection_context JSON NULL COMMENT '检测上下文（事件时间等）',
   pending_escalations JSON NULL COMMENT '待机升级状态映射',
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -52,7 +52,7 @@ CREATE TABLE IF NOT EXISTS exception_event (
 | resolution_reason | VARCHAR(255) | 否 | NULL | 解除原因描述 |
 | resolution_source | VARCHAR(64) | 否 | NULL | 解除来源：MANUAL_RESOLUTION/AUTO_RECOVERY |
 | last_escalated_at | DATETIME | 否 | NULL | 最近一次升级时间 |
-| recovery_flag | TINYINT(1) | 是 | 0 | 启动恢复时是否已处理过，防重复恢复 |
+| recovery_flag | TINYINT(1) | 是 | 0 | 【已废弃】原用于标记启动恢复，现改用 pending_escalations 状态判断 |
 | detection_context | JSON | 否 | NULL | 检测上下文，存储外部事件时间等 |
 | pending_escalations | JSON | 否 | NULL | 待机升级状态映射，记录等待中的升级 |
 | created_at | DATETIME | 是 | CURRENT_TIMESTAMP | 创建时间 |
@@ -80,6 +80,8 @@ CREATE TABLE IF NOT EXISTS exception_event (
     "LEVEL_2": {
       "status": "READY",
       "readyAt": "2025-12-12T10:00:00",
+      "scheduledTime": "2025-12-12T12:00:00",
+      "taskId": "12345",
       "dependencies": [
         {"eventType": "FIRST_BOREHOLE_START", "delayMinutes": 120, "required": true}
       ],
@@ -403,8 +405,32 @@ VALUES (100, 1, 'LEVEL_1', 'ALERT_TRIGGERED', '2025-12-12 08:30:00', '业务检�
 - JSON 字段统一：采用 MySQL 8 JSON 类型，前后端统一键名（`detection_context`, `pending_escalations`, `trigger_condition`, `dependent_events`）。
 - 时间单位与偏移：前端可选择“分钟/小时/天”，后端存储时建议转换为分钟或保留原单位但在服务层统一解释。
 - 索引建议：对高频查询字段（状态、类型、时间）建立索引；JSON 字段可按需增设生成列实现二级索引。
-- 审计与恢复：事件状态迁移（ACTIVE→RESOLVING→RESOLVED）以及任务取消应有日志；`recovery_flag` 标记用于启动恢复过程。
+- 审计与恢复：事件状态迁移（ACTIVE→RESOLVING→RESOLVED）以及任务取消应有日志；启动恢复基于 `pending_escalations` 状态（WAITING/READY）判断，不再依赖 `recovery_flag`。
+### pending_escalations 字段详细结构
+```json
+{
+  "LEVEL_N": {
+    "status": "WAITING | READY | COMPLETED",
+    "createdAt": "待机创建时间",
+    "readyAt": "依赖满足时间（status=READY时设置）",
+    "scheduledTime": "计划执行时间（考虑延迟）",
+    "taskId": "调度系统中的任务ID（用于取消任务）",
+    "dependencies": [
+      {
+        "eventType": "事件类型",
+        "delayMinutes": 120,
+        "required": true
+      }
+    ],
+    "logicalOperator": "AND | OR"
+  }
+}
+```
 
+**字段说明**:
+- `taskId`: 由 AlertEscalationService 创建任务后写入，用于系统恢复时取消旧任务
+- `scheduledTime`: AlertDependencyManager 计算的实际执行时间，包含事件时间+延迟
+- `readyAt`: 标记依赖满足的时刻，用于审计和追踪
 ---
 
 如需我把这些 DDL 直接落到 `schema.sql` 并提供 Flyway/Liquibase 脚本，我可以继续集成，并补充生成列索引示例（例如对 `alert_rule.level`、`exception_event.status` 的组合索引与 JSON Path 生成列）。

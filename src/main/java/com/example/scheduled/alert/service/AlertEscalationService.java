@@ -5,6 +5,7 @@ import com.example.scheduled.alert.entity.*;
 import com.example.scheduled.alert.repository.AlertEventLogRepository;
 import com.example.scheduled.alert.repository.AlertRuleRepository;
 import com.example.scheduled.alert.repository.ExceptionEventRepository;
+import com.example.scheduled.alert.repository.TriggerConditionRepository;
 import com.example.scheduled.alert.trigger.TriggerStrategy;
 import com.example.scheduled.alert.trigger.TriggerStrategyFactory;
 import com.example.scheduled.entity.ScheduledTask;
@@ -15,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,7 @@ public class AlertEscalationService {
     private final AlertEventLogRepository alertEventLogRepository;
     private final TaskManagementService taskManagementService;
     private final TriggerStrategyFactory triggerStrategyFactory;
+    private final TriggerConditionRepository triggerConditionRepository;
 
     /**
      * 当异常事件创建时调用 - 为最低等级创建初始评估任务
@@ -43,9 +46,14 @@ public class AlertEscalationService {
     public void scheduleInitialEvaluation(ExceptionEvent event) {
         log.info("为异常事件 [{}] 创建初始评估任务", event.getId());
 
-        // 1. 获取该异常类型的所有启用的报警规则（按等级从低到高排序）
+        // 1. 获取该异常类型的所有启用的报警规则
         List<AlertRule> allRules = alertRuleRepository
                 .findEnabledRulesByExceptionType(event.getExceptionTypeId());
+        
+        // 按等级优先级排序（从低到高）
+        // BLUE/LEVEL_1 (priority=1) < YELLOW/LEVEL_2 (priority=2) < RED/LEVEL_3 (priority=3)
+        allRules.sort(Comparator.comparingInt((AlertRule rule) -> AlertConstants.AlertLevels.getPriority(rule.getLevel()))
+                                .thenComparingLong(AlertRule::getId));
 
         if (allRules.isEmpty()) {
             log.warn("异常类型 [{}] 没有配置任何报警规则", event.getExceptionTypeId());
@@ -63,11 +71,12 @@ public class AlertEscalationService {
     @Transactional
     public void createEvaluationTask(ExceptionEvent event, AlertRule rule) {
         try {
-            // 获取触发条件并创建策略
-            TriggerCondition condition = new TriggerCondition();
-            condition.setId(rule.getTriggerConditionId());
-            // 从数据库加载完整的条件信息
-            // TODO: 需要注入 TriggerConditionRepository 来加载完整信息
+            // 从数据库加载完整的触发条件信息
+            TriggerCondition condition = triggerConditionRepository.selectById(rule.getTriggerConditionId());
+            if (condition == null) {
+                log.warn("触发条件不存在: triggerConditionId={}", rule.getTriggerConditionId());
+                return;
+            }
 
             TriggerStrategy strategy = triggerStrategyFactory.createStrategy(condition);
 
@@ -148,6 +157,10 @@ public class AlertEscalationService {
         // 1. 获取所有规则，找到下一个更高等级的规则
         List<AlertRule> allRules = alertRuleRepository
                 .findEnabledRulesByExceptionType(event.getExceptionTypeId());
+        
+        // 按等级优先级排序（从低到高）
+        allRules.sort(Comparator.comparingInt((AlertRule rule) -> AlertConstants.AlertLevels.getPriority(rule.getLevel()))
+                                .thenComparingLong(AlertRule::getId));
 
         // 2. 过滤出更高等级的规则
         List<AlertRule> higherRules = allRules.stream()
@@ -236,6 +249,10 @@ public class AlertEscalationService {
             List<AlertRule> rules = alertRuleRepository
                     .findEnabledRulesByExceptionType(event.getExceptionTypeId());
             
+            // 按等级优先级排序（从低到高）
+            rules.sort(Comparator.comparingInt((AlertRule rule) -> AlertConstants.AlertLevels.getPriority(rule.getLevel()))
+                                 .thenComparingLong(AlertRule::getId));
+            
             AlertRule targetRule = rules.stream()
                     .filter(rule -> rule.getLevel().equals(levelName))
                     .findFirst()
@@ -282,10 +299,17 @@ public class AlertEscalationService {
      * 维护待机任务映射关系（支持任务取消）
      * 当创建评估任务时，记录该任务的ID以便后续取消
      * 
-     * 实现策略：
-     * 1. 使用静态 Map<Long, List<String>> 记录 exceptionEventId -> taskIds
-     * 2. 或者在 ExceptionEvent.pending_escalations JSON 中记录任务ID
-     * 3. 在 AlertResolutionService.cancelAllPendingTasks 中使用
+     * 持久化策略（双层设计）：
+     * 1. 【主要】ExceptionEvent.pending_escalations JSON 字段 - 持久化到数据库，重启不丢失
+     * 2. 【辅助】内存 Map<Long, List<String>> - 快速访问，重启后清空但会自动恢复
+     * 
+     * 恢复机制：
+     * - 系统重启时，AlertRecoveryService 从数据库读取 pending_escalations
+     * - 重新调度任务时，会自动调用 recordPendingTask() 重新填充此 Map
+     * - 因此重启后内存 Map 会自动恢复
+     * 
+     * 使用场景：
+     * - AlertResolutionService.cancelAllPendingTasks() - 快速取消所有待机任务
      */
     private static final Map<Long, List<String>> PENDING_TASK_MAP = new java.util.concurrent.ConcurrentHashMap<>();
 
