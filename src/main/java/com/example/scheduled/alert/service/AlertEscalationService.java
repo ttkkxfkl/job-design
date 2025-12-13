@@ -23,6 +23,7 @@ import java.util.Map;
 
 import static com.example.scheduled.alert.constant.AlertConstants.ActionStatus.SENT;
 import static com.example.scheduled.alert.constant.AlertConstants.Defaults.*;
+import static com.example.scheduled.alert.constant.AlertConstants.PendingEscalationStatus.WAITING;
 
 /**
  * 报警升级服务 - 负责报警的升级流程和评估任务的创建
@@ -84,38 +85,136 @@ public class AlertEscalationService {
             LocalDateTime nextEvaluationTime = strategy
                     .calculateNextEvaluationTime(condition, event, LocalDateTime.now());
 
-            if (nextEvaluationTime != null) {
-                // 构造任务数据
-                Map<String, Object> taskData = new HashMap<>();
-                taskData.put("exceptionEventId", event.getId());
-                taskData.put("alertRuleId", rule.getId());
-                taskData.put("evaluationType", "ALERT_EVALUATION");
-
-                // 创建一个 ONCE 模式的定时任务提交给调度系统
-                ScheduledTask task = taskManagementService.createOnceTask(
-                        "报警评估-异常[" + event.getId() + "]-规则[" + rule.getId() + "]",
-                        ScheduledTask.TaskType.ALERT,
-                        nextEvaluationTime,
-                        taskData,
-                        DEFAULT_MAX_RETRY_COUNT,
-                        rule.getPriority(),
-                        DEFAULT_EXECUTION_TIMEOUT
-                );
-                
-                String taskId = String.valueOf(task.getId());
-                
-                // 【关键】将任务ID持久化到 pending_escalations JSON 中，防止重启后丢失
-                updatePendingEscalationsWithTaskId(event, rule.getLevel(), taskId, nextEvaluationTime);
-                
-                // 记录到内存Map（用于快速访问）
-                recordPendingTask(event.getId(), taskId);
-
-                log.info("已创建评估任务: 异常[{}] 规则[{}] 等级[{}] 评估时间[{}] 任务ID[{}]",
-                        event.getId(), rule.getId(), rule.getLevel(), nextEvaluationTime, taskId);
+            // 如果策略返回 null，尝试闭环处理：
+            // 1) 对相对事件：根据 detection_context 推导触发时间；缺少事件时写入 WAITING
+            // 2) 其他情况：记录警告并跳过
+            if (nextEvaluationTime == null) {
+                LocalDateTime recoveredTime = recoverRelativeTriggerTime(condition, event, rule);
+                if (recoveredTime == null) {
+                    return;
+                }
+                nextEvaluationTime = recoveredTime;
             }
+
+            // 构造任务数据
+            Map<String, Object> taskData = new HashMap<>();
+            taskData.put("exceptionEventId", event.getId());
+            taskData.put("alertRuleId", rule.getId());
+            taskData.put("evaluationType", "ALERT_EVALUATION");
+
+            // 创建一个 ONCE 模式的定时任务提交给调度系统
+            ScheduledTask task = taskManagementService.createOnceTask(
+                    "报警评估-异常[" + event.getId() + "]-规则[" + rule.getId() + "]",
+                    ScheduledTask.TaskType.ALERT,
+                    nextEvaluationTime,
+                    taskData,
+                    DEFAULT_MAX_RETRY_COUNT,
+                    rule.getPriority(),
+                    DEFAULT_EXECUTION_TIMEOUT
+            );
+
+            String taskId = String.valueOf(task.getId());
+
+            // 【关键】将任务ID持久化到 pending_escalations JSON 中，防止重启后丢失
+            updatePendingEscalationsWithTaskId(event, rule.getLevel(), taskId, nextEvaluationTime);
+
+            // 记录到内存Map（用于快速访问）
+            recordPendingTask(event.getId(), taskId);
+
+            log.info("已创建评估任务: 异常[{}] 规则[{}] 等级[{}] 评估时间[{}] 任务ID[{}]",
+                    event.getId(), rule.getId(), rule.getLevel(), nextEvaluationTime, taskId);
         } catch (Exception e) {
             log.error("创建评估任务失败: 异常[{}] 规则[{}]", event.getId(), rule.getId(), e);
         }
+    }
+
+    /**
+     * 当策略返回 null 时，对相对事件触发进行补偿：
+     * - detection_context 缺少事件 → 写入 WAITING，等待外部事件再由 AlertDependencyManager 触发
+     * - 事件已存在但时间未到 → 返回计算出的触发时间
+     * - 事件已存在且已过触发点 → 立即调度（补偿执行）
+     */
+    private LocalDateTime recoverRelativeTriggerTime(TriggerCondition condition, ExceptionEvent event, AlertRule rule) {
+        // 仅处理相对事件场景，其余直接告警并跳过
+        if (condition.getRelativeEventType() == null || condition.getRelativeDurationMinutes() == null) {
+            log.warn("无法计算下一次评估时间且非相对事件: exceptionEventId={}, ruleId={}, level={}",
+                    event.getId(), rule.getId(), rule.getLevel());
+            return null;
+        }
+
+        LocalDateTime eventTime = extractEventTime(event, condition.getRelativeEventType());
+        if (eventTime == null) {
+            // 将该等级写入 pending_escalations=WAITING，等事件到来后由依赖管理器调度
+            writeWaitingPending(event, rule, condition);
+            log.warn("相对事件时间缺失，已写入待机状态: exceptionEventId={}, level={}, relativeEventType={}",
+                    event.getId(), rule.getLevel(), condition.getRelativeEventType());
+            return null;
+        }
+
+        LocalDateTime triggerTime = eventTime.plusMinutes(condition.getRelativeDurationMinutes());
+        LocalDateTime now = LocalDateTime.now();
+
+        if (now.isBefore(triggerTime)) {
+            return triggerTime; // 未来时间，正常调度
+        }
+
+        // 已过触发点，立即补偿执行
+        return now;
+    }
+
+    /**
+     * 从 detection_context 解析事件时间，支持字符串存储。
+     */
+    private LocalDateTime extractEventTime(ExceptionEvent event, String eventType) {
+        if (event.getDetectionContext() == null) {
+            return null;
+        }
+        Object timeObj = event.getDetectionContext().get(eventType + "_time");
+        if (timeObj == null) {
+            return null;
+        }
+        try {
+            if (timeObj instanceof LocalDateTime ldt) {
+                return ldt;
+            }
+            return LocalDateTime.parse(timeObj.toString());
+        } catch (Exception parseEx) {
+            log.warn("解析相对事件时间失败: eventType={}, value={}", eventType, timeObj, parseEx);
+            return null;
+        }
+    }
+
+    /**
+     * 将当前等级写入 pending_escalations 为 WAITING，等待相对事件到达。
+     */
+    private void writeWaitingPending(ExceptionEvent event, AlertRule rule, TriggerCondition condition) {
+        Map<String, Object> pending = event.getPendingEscalations();
+        if (pending == null) {
+            pending = new HashMap<>();
+        }
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> levelStatus = (Map<String, Object>) pending.get(rule.getLevel());
+        if (levelStatus == null) {
+            levelStatus = new HashMap<>();
+            pending.put(rule.getLevel(), levelStatus);
+        }
+
+        levelStatus.put("status", WAITING);
+        levelStatus.put("createdAt", LocalDateTime.now().toString());
+
+        // 写入依赖信息，供 AlertDependencyManager 后续检查
+        List<Map<String, Object>> dependencies = new java.util.ArrayList<>();
+        Map<String, Object> dep = new HashMap<>();
+        dep.put("eventType", condition.getRelativeEventType());
+        dep.put("delayMinutes", condition.getRelativeDurationMinutes());
+        dep.put("required", true);
+        dependencies.add(dep);
+        levelStatus.put("dependencies", dependencies);
+        levelStatus.put("logicalOperator", "AND");
+
+        event.setPendingEscalations(pending);
+        exceptionEventRepository.updateById(event);
     }
     
     /**

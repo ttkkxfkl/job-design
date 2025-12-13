@@ -10,6 +10,7 @@ import java.util.List;
 /**
  * 报警规则数据仓储
  */
+@SuppressWarnings("all")
 @Mapper
 public interface AlertRuleRepository extends BaseMapper<AlertRule> {
 

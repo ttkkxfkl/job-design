@@ -75,17 +75,17 @@ public class AlertExecutor implements TaskExecutor {
                 log.warn("报警规则 [{}] 不存在", alertRuleId);
                 return;
             }
-            
+
             // 【关键】幂等性检查：如果事件已解除，跳过执行
             if (!ACTIVE.equals(event.getStatus())) {
-                log.info("异常事件已解除（status={}），跳过评估: exceptionEventId={}", 
+                log.info("异常事件已解除（status={}），跳过评估: exceptionEventId={}",
                         event.getStatus(), exceptionEventId);
                 return;
             }
-            
+
             // 【关键】幂等性检查：检查是否已执行过此等级（防止重复执行）
             if (isLevelAlreadyTriggered(event, rule.getLevel())) {
-                log.info("等级 [{}] 已触发过，跳过重复执行: exceptionEventId={}", 
+                log.info("等级 [{}] 已触发过，跳过重复执行: exceptionEventId={}",
                         rule.getLevel(), exceptionEventId);
                 return;
             }
@@ -163,7 +163,13 @@ public class AlertExecutor implements TaskExecutor {
     }
 
     /**
-     * 处理报警条件不满足的情况
+     * 处理报警条件不满足的情况（异常场景）
+     * 
+     * 正常情况下不应该走到这里，因为调度系统已按计算的时间执行。
+     * 可能的异常原因：
+     * 1. 调度偏差（提前执行） → 重新调度到正确时间
+     * 2. 时间窗口限制 → 调度到窗口内的下一个时间点
+     * 3. 数据被篡改/策略异常 → 记录错误
      */
     private void handleAlertNotTriggered(
             ExceptionEvent event,
@@ -171,21 +177,31 @@ public class AlertExecutor implements TaskExecutor {
             TriggerCondition condition,
             TriggerStrategy strategy) {
 
-        log.info("报警条件未满足: 异常[{}] 规则[{}] 等级[{}]，继续等待", event.getId(), rule.getId(), rule.getLevel());
+        log.warn("报警条件未满足（异常情况）: 异常[{}] 规则[{}] 等级[{}]", 
+                event.getId(), rule.getId(), rule.getLevel());
 
         // 计算下次评估时间
+        LocalDateTime now = LocalDateTime.now();
         LocalDateTime nextEvaluationTime = strategy
-                .calculateNextEvaluationTime(condition, event, LocalDateTime.now());
+                .calculateNextEvaluationTime(condition, event, now);
 
-        if (nextEvaluationTime != null) {
-            // 为同一等级创建下一次评估任务
-            // 在这里我们只是重新计算，如果需要的话可以创建新的 ScheduledTask
-            log.info("下次评估时间: {}", nextEvaluationTime);
+        if (nextEvaluationTime != null && nextEvaluationTime.isAfter(now)) {
+            // 情况1: 时间未到（调度偏差或时间窗口限制），重新调度
+            log.warn("触发时间未到，重新调度评估任务: 异常[{}] 规则[{}] 下次时间[{}]",
+                    event.getId(), rule.getId(), nextEvaluationTime);
             
-            // TODO: 可以选择在这里创建新的评估任务，或者让调度器自己处理
-            // alertEscalationService.createEvaluationTask(event, rule);
+            alertEscalationService.createEvaluationTask(event, rule);
+            
         } else {
-            log.info("无需再评估该等级的条件");
+            // 情况2: 其他异常（数据问题/策略bug）
+            log.error("报警评估异常：无法计算下次时间或策略判断失败: exceptionEventId={}, ruleId={}, level={}, " +
+                    "condition={}, detectionContext={}", 
+                    event.getId(), rule.getId(), rule.getLevel(), 
+                    condition, event.getDetectionContext());
+            
+            // 记录异常日志到数据库，便于排查
+            alertEscalationService.logAlertEvent(event, rule, 
+                    "报警评估异常：条件判断失败，nextEvaluationTime=" + nextEvaluationTime);
         }
     }
 
@@ -242,7 +258,7 @@ public class AlertExecutor implements TaskExecutor {
         }
         return detected;
     }
-    
+
     /**
      * 检查指定等级是否已触发过（幂等性保护）
      * 防止Quartz持久化冲突导致重复执行
@@ -251,15 +267,15 @@ public class AlertExecutor implements TaskExecutor {
         // 检查 alert_event_log 中是否有该等级的 ALERT_TRIGGERED 记录
         LambdaQueryWrapper<AlertEventLog> wrapper = new LambdaQueryWrapper<>();
         wrapper.eq(AlertEventLog::getExceptionEventId, event.getId())
-               .eq(AlertEventLog::getAlertLevel, level)
-               .eq(AlertEventLog::getEventType, ALERT_TRIGGERED);
-        
+                .eq(AlertEventLog::getAlertLevel, level)
+                .eq(AlertEventLog::getEventType, ALERT_TRIGGERED);
+
         long count = alertEventLogRepository.selectCount(wrapper);
-        
+
         if (count > 0) {
             log.debug("等级 [{}] 已有 {} 条触发记录", level, count);
         }
-        
+
         return count > 0;
     }
 }
