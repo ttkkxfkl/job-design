@@ -5,6 +5,7 @@ import com.example.scheduled.alert.entity.*;
 import com.example.scheduled.alert.repository.*;
 import com.example.scheduled.alert.service.AlertEscalationService;
 import com.example.scheduled.dto.ApiResponse;
+import com.example.scheduled.dto.AlertRuleConfigDTO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.*;
@@ -14,6 +15,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 报警规则管理 API 控制器
@@ -839,6 +841,400 @@ public class AlertRuleController {
         } catch (Exception e) {
             log.error("解决异常事件失败", e);
             return ApiResponse.error("解决异常事件失败: " + e.getMessage());
+        }
+    }
+
+    // ==================== 规则配置管理（规则+触发条件一体） ====================
+
+    /**
+     * 创建报警规则配置（规则 + 触发条件 + 阈值一体）
+     * 
+     * 【示例请求】
+     * POST /api/alert/rule-config
+     * {
+     *   "exceptionTypeId": 1,
+     *   "level": "LEVEL_1",
+     *   "orgScope": "山西省",
+     *   "enabled": true,
+     *   "triggerCondition": {
+     *     "conditionType": "ABSOLUTE",
+     *     "absoluteTime": "16:00:00"
+     *   },
+     *   "operator": ">",
+     *   "thresholdValue": 16,
+     *   "timeUnit": "HOUR",
+     *   "actionType": "LOG",
+     *   "actionConfig": {
+     *     "logLevel": "WARN",
+     *     "message": "异常告警已触发"
+     *   },
+     *   "priority": 5
+     * }
+     * 
+     * 【示例响应】
+     * {
+     *   "code": 0,
+     *   "message": "规则配置创建成功",
+     *   "data": {
+     *     "id": 1,
+     *     "exceptionTypeId": 1,
+     *     "level": "LEVEL_1",
+     *     "orgScope": "山西省",
+     *     "enabled": true,
+     *     "triggerCondition": {
+     *       "id": 10,
+     *       "conditionType": "ABSOLUTE",
+     *       "absoluteTime": "16:00:00",
+     *       "displayName": "每天16:00触发"
+     *     },
+     *     "operator": ">",
+     *     "thresholdValue": 16,
+     *     "timeUnit": "HOUR",
+     *     "actionType": "LOG",
+     *     "actionConfig": {...},
+     *     "priority": 5
+     *   }
+     * }
+     */
+    @PostMapping("/rule-config")
+    public ApiResponse<?> createRuleConfig(@RequestBody AlertRuleConfigDTO configDTO) {
+        try {
+            // 1. 创建或获取触发条件
+            TriggerCondition triggerCondition = new TriggerCondition();
+            AlertRuleConfigDTO.TriggerConditionInfo tcInfo = configDTO.getTriggerCondition();
+            
+            triggerCondition.setConditionType(tcInfo.getConditionType());
+            // 时间字段转换：String -> LocalTime
+            if (tcInfo.getAbsoluteTime() != null) {
+                triggerCondition.setAbsoluteTime(java.time.LocalTime.parse(tcInfo.getAbsoluteTime()));
+            }
+            triggerCondition.setRelativeEventType(tcInfo.getRelativeEventType());
+            triggerCondition.setRelativeDurationMinutes(tcInfo.getRelativeDurationMinutes());
+            if (tcInfo.getTimeWindowStart() != null) {
+                triggerCondition.setTimeWindowStart(java.time.LocalTime.parse(tcInfo.getTimeWindowStart()));
+            }
+            if (tcInfo.getTimeWindowEnd() != null) {
+                triggerCondition.setTimeWindowEnd(java.time.LocalTime.parse(tcInfo.getTimeWindowEnd()));
+            }
+            triggerCondition.setLogicalOperator(tcInfo.getLogicalOperator());
+            triggerCondition.setCombinedConditionIds(tcInfo.getCombinedConditionIds());
+            triggerCondition.setCreatedAt(LocalDateTime.now());
+            triggerCondition.setUpdatedAt(LocalDateTime.now());
+            triggerConditionRepository.insert(triggerCondition);
+
+            // 2. 创建报警规则
+            AlertRule rule = new AlertRule();
+            rule.setExceptionTypeId(configDTO.getExceptionTypeId());
+            rule.setLevel(configDTO.getLevel());
+            rule.setTriggerConditionId(triggerCondition.getId());
+            rule.setActionType(configDTO.getActionType());
+            rule.setActionConfig(configDTO.getActionConfig());
+            rule.setPriority(configDTO.getPriority() != null ? configDTO.getPriority() : 5);
+            rule.setEnabled(configDTO.getEnabled() != null ? configDTO.getEnabled() : true);
+            rule.setCreatedAt(LocalDateTime.now());
+            rule.setUpdatedAt(LocalDateTime.now());
+            
+            // 扩展字段（可选）
+            if (configDTO.getOrgScope() != null) {
+                // 如果 AlertRule 添加了 orgScope 字段，这里设置
+                // rule.setOrgScope(configDTO.getOrgScope());
+            }
+            if (configDTO.getOperator() != null) {
+                // 如果 AlertRule 添加了 operator 字段，这里设置
+                // rule.setOperator(configDTO.getOperator());
+            }
+            if (configDTO.getThresholdValue() != null) {
+                // rule.setThresholdValue(configDTO.getThresholdValue());
+            }
+            if (configDTO.getTimeUnit() != null) {
+                // rule.setTimeUnit(configDTO.getTimeUnit());
+            }
+            
+            alertRuleRepository.insert(rule);
+
+            // 3. 返回完整的配置信息
+            return ApiResponse.success("规则配置创建成功", convertToDTO(rule, triggerCondition));
+        } catch (Exception e) {
+            log.error("创建规则配置失败", e);
+            return ApiResponse.error("创建规则配置失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取单个规则配置
+     * 
+     * 【示例请求】
+     * GET /api/alert/rule-config/1
+     * 
+     * 【示例响应】
+     * {
+     *   "code": 0,
+     *   "message": "查询成功",
+     *   "data": {
+     *     "id": 1,
+     *     "exceptionTypeId": 1,
+     *     "level": "LEVEL_1",
+     *     "orgScope": "山西省",
+     *     "enabled": true,
+     *     "triggerCondition": {...},
+     *     "operator": ">",
+     *     "thresholdValue": 16,
+     *     "timeUnit": "HOUR",
+     *     "actionType": "LOG",
+     *     "actionConfig": {...},
+     *     "priority": 5,
+     *     "createdAt": "2025-12-13T10:00:00",
+     *     "updatedAt": "2025-12-13T10:00:00"
+     *   }
+     * }
+     */
+    @GetMapping("/rule-config/{id}")
+    public ApiResponse<?> getRuleConfig(@PathVariable Long id) {
+        try {
+            AlertRule rule = alertRuleRepository.selectById(id);
+            if (rule == null) {
+                return ApiResponse.error("规则不存在");
+            }
+            
+            TriggerCondition triggerCondition = triggerConditionRepository.selectById(rule.getTriggerConditionId());
+            
+            return ApiResponse.success("查询成功", convertToDTO(rule, triggerCondition));
+        } catch (Exception e) {
+            log.error("查询规则配置失败", e);
+            return ApiResponse.error("查询规则配置失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 更新规则配置
+     * 
+     * 【示例请求】
+     * PUT /api/alert/rule-config/1
+     * {
+     *   "level": "LEVEL_2",
+     *   "enabled": false,
+     *   "operator": ">=",
+     *   "thresholdValue": 20,
+     *   "actionConfig": {
+     *     "recipients": ["admin@company.com"],
+     *     "subject": "【更新】报警通知"
+     *   }
+     * }
+     * 
+     * 【示例响应】
+     * {
+     *   "code": 0,
+     *   "message": "规则配置更新成功",
+     *   "data": {...}
+     * }
+     */
+    @PutMapping("/rule-config/{id}")
+    public ApiResponse<?> updateRuleConfig(@PathVariable Long id, @RequestBody AlertRuleConfigDTO configDTO) {
+        try {
+            AlertRule existingRule = alertRuleRepository.selectById(id);
+            if (existingRule == null) {
+                return ApiResponse.error("规则不存在");
+            }
+
+            // 更新规则字段
+            if (configDTO.getLevel() != null) {
+                existingRule.setLevel(configDTO.getLevel());
+            }
+            if (configDTO.getEnabled() != null) {
+                existingRule.setEnabled(configDTO.getEnabled());
+            }
+            if (configDTO.getPriority() != null) {
+                existingRule.setPriority(configDTO.getPriority());
+            }
+            if (configDTO.getActionType() != null) {
+                existingRule.setActionType(configDTO.getActionType());
+            }
+            if (configDTO.getActionConfig() != null) {
+                existingRule.setActionConfig(configDTO.getActionConfig());
+            }
+            
+            // 扩展字段更新
+            if (configDTO.getOrgScope() != null) {
+                // existingRule.setOrgScope(configDTO.getOrgScope());
+            }
+            if (configDTO.getOperator() != null) {
+                // existingRule.setOperator(configDTO.getOperator());
+            }
+            if (configDTO.getThresholdValue() != null) {
+                // existingRule.setThresholdValue(configDTO.getThresholdValue());
+            }
+            if (configDTO.getTimeUnit() != null) {
+                // existingRule.setTimeUnit(configDTO.getTimeUnit());
+            }
+            
+            existingRule.setUpdatedAt(LocalDateTime.now());
+            alertRuleRepository.updateById(existingRule);
+
+            TriggerCondition triggerCondition = triggerConditionRepository.selectById(existingRule.getTriggerConditionId());
+            
+            return ApiResponse.success("规则配置更新成功", convertToDTO(existingRule, triggerCondition));
+        } catch (Exception e) {
+            log.error("更新规则配置失败", e);
+            return ApiResponse.error("更新规则配置失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 删除规则配置（同时删除关联的触发条件）
+     * 
+     * 【示例请求】
+     * DELETE /api/alert/rule-config/1
+     * 
+     * 【示例响应 - 成功】
+     * {
+     *   "code": 0,
+     *   "message": "规则配置删除成功",
+     *   "data": 1
+     * }
+     */
+    @DeleteMapping("/rule-config/{id}")
+    public ApiResponse<?> deleteRuleConfig(@PathVariable Long id) {
+        try {
+            AlertRule rule = alertRuleRepository.selectById(id);
+            if (rule == null) {
+                return ApiResponse.error("规则不存在");
+            }
+
+            // 删除触发条件
+            triggerConditionRepository.deleteById(rule.getTriggerConditionId());
+            
+            // 删除规则
+            alertRuleRepository.deleteById(id);
+
+            return ApiResponse.success("规则配置删除成功", id);
+        } catch (Exception e) {
+            log.error("删除规则配置失败", e);
+            return ApiResponse.error("删除规则配置失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 获取规则配置列表
+     * 
+     * 【示例请求】
+     * GET /api/alert/rule-configs
+     * GET /api/alert/rule-configs?exceptionTypeId=1
+     * GET /api/alert/rule-configs?level=LEVEL_1
+     * GET /api/alert/rule-configs?enabled=true
+     * 
+     * 【示例响应】
+     * {
+     *   "code": 0,
+     *   "message": "查询成功",
+     *   "data": [
+     *     {
+     *       "id": 1,
+     *       "exceptionTypeId": 1,
+     *       "level": "LEVEL_1",
+     *       "enabled": true,
+     *       "triggerCondition": {...},
+     *       "actionType": "LOG",
+     *       "priority": 5
+     *     },
+     *     {
+     *       "id": 2,
+     *       "exceptionTypeId": 1,
+     *       "level": "LEVEL_2",
+     *       "enabled": true,
+     *       "triggerCondition": {...},
+     *       "actionType": "EMAIL",
+     *       "priority": 6
+     *     }
+     *   ]
+     * }
+     */
+    @GetMapping("/rule-configs")
+    public ApiResponse<?> listRuleConfigs(
+            @RequestParam(required = false) Long exceptionTypeId,
+            @RequestParam(required = false) String level,
+            @RequestParam(required = false) Boolean enabled) {
+        try {
+            List<AlertRule> rules = alertRuleRepository.selectList(null);
+            
+            // 过滤
+            List<AlertRuleConfigDTO> configs = rules.stream()
+                    .filter(rule -> exceptionTypeId == null || rule.getExceptionTypeId().equals(exceptionTypeId))
+                    .filter(rule -> level == null || rule.getLevel().equals(level))
+                    .filter(rule -> enabled == null || rule.getEnabled().equals(enabled))
+                    .map(rule -> {
+                        TriggerCondition tc = triggerConditionRepository.selectById(rule.getTriggerConditionId());
+                        return convertToDTO(rule, tc);
+                    })
+                    .collect(Collectors.toList());
+
+            return ApiResponse.success("查询成功", configs);
+        } catch (Exception e) {
+            log.error("查询规则配置列表失败", e);
+            return ApiResponse.error("查询规则配置列表失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 辅助方法：将 AlertRule + TriggerCondition 转换为 AlertRuleConfigDTO
+     */
+    private AlertRuleConfigDTO convertToDTO(AlertRule rule, TriggerCondition triggerCondition) {
+        // 时间字段转换：LocalTime -> String
+        String absoluteTimeStr = triggerCondition.getAbsoluteTime() != null 
+            ? triggerCondition.getAbsoluteTime().toString() 
+            : null;
+        String timeWindowStartStr = triggerCondition.getTimeWindowStart() != null 
+            ? triggerCondition.getTimeWindowStart().toString() 
+            : null;
+        String timeWindowEndStr = triggerCondition.getTimeWindowEnd() != null 
+            ? triggerCondition.getTimeWindowEnd().toString() 
+            : null;
+
+        AlertRuleConfigDTO.TriggerConditionInfo tcInfo = AlertRuleConfigDTO.TriggerConditionInfo.builder()
+                .id(triggerCondition.getId())
+                .conditionType(triggerCondition.getConditionType())
+                .absoluteTime(absoluteTimeStr)
+                .relativeEventType(triggerCondition.getRelativeEventType())
+                .relativeDurationMinutes(triggerCondition.getRelativeDurationMinutes())
+                .timeWindowStart(timeWindowStartStr)
+                .timeWindowEnd(timeWindowEndStr)
+                .logicalOperator(triggerCondition.getLogicalOperator())
+                .combinedConditionIds(triggerCondition.getCombinedConditionIds())
+                .displayName(generateDisplayName(triggerCondition))
+                .build();
+
+        return AlertRuleConfigDTO.builder()
+                .id(rule.getId())
+                .exceptionTypeId(rule.getExceptionTypeId())
+                .level(rule.getLevel())
+                // .orgScope(rule.getOrgScope())  // 待扩展字段
+                .enabled(rule.getEnabled())
+                .priority(rule.getPriority())
+                .triggerCondition(tcInfo)
+                // .operator(rule.getOperator())  // 待扩展字段
+                // .thresholdValue(rule.getThresholdValue())  // 待扩展字段
+                // .timeUnit(rule.getTimeUnit())  // 待扩展字段
+                .actionType(rule.getActionType())
+                .actionConfig(rule.getActionConfig())
+                .createdAt(rule.getCreatedAt())
+                .updatedAt(rule.getUpdatedAt())
+                .build();
+    }
+
+    /**
+     * 辅助方法：生成触发条件的显示名称
+     */
+    private String generateDisplayName(TriggerCondition tc) {
+        if (tc == null) return "";
+        
+        switch (tc.getConditionType()) {
+            case "ABSOLUTE":
+                return "绝对时刻: " + tc.getAbsoluteTime();
+            case "RELATIVE":
+                return "相对事件: " + tc.getRelativeEventType() + " 后 " + tc.getRelativeDurationMinutes() + " 分钟";
+            case "HYBRID":
+                return "混合条件: " + tc.getLogicalOperator() + " (" + tc.getCombinedConditionIds() + ")";
+            default:
+                return tc.getConditionType();
         }
     }
 }
